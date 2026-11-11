@@ -1,0 +1,16 @@
+{
+  "name": "ASIA - Assistente Musicale",
+  "short_name": "ASIA",
+  "description": "Assistente vocale per cercare e ascoltare musica su YouTube parlando",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "lang": "it",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

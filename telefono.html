@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>ASIA - anteprima telefono</title>
+<style>
+  body { margin: 0; min-height: 100vh; background: #2b2f36; color: #ddd;
+         font: 14px system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; }
+  header { margin: 14px 0 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  header b { color: #fff; font-size: 16px; }
+  button { background: #444; color: #fff; border: 1px solid #666; border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  button.attivo { background: #2e8b57; border-color: #3ddc84; }
+  .telefono { background: #111; border-radius: 42px; padding: 14px; box-shadow: 0 10px 40px rgba(0,0,0,.6), inset 0 0 0 2px #333; position: relative; }
+  .telefono::before { content: ''; position: absolute; top: 6px; left: 50%; width: 70px; height: 5px; margin-left: -35px; background: #333; border-radius: 3px; }
+  iframe { display: block; border: 0; border-radius: 30px; background: #000; }
+  p { color: #9aa; max-width: 640px; text-align: center; line-height: 1.5; }
+</style>
+</head>
+<body>
+<header>
+  <b>📱 ASIA come sul telefono</b>
+  <button data-w="360" data-h="780">Telefono piccolo</button>
+  <button data-w="412" data-h="892" class="attivo">Telefono normale</button>
+  <button data-w="800" data-h="1100">Tablet</button>
+  <button id="ruota">↻ Ruota</button>
+  <button id="ricarica">⟳ Ricarica</button>
+</header>
+<div class="telefono"><iframe id="schermo" src="index.html" width="412" height="892" allow="microphone; autoplay"></iframe></div>
+<p>Clicca dentro lo schermo prima di usare la tastiera (INVIO, M per spostare, ecc.).
+   Le posizioni scelte qui si salvano come "telefono", separate da quelle del PC.</p>
+<script>
+  const f = document.getElementById('schermo');
+  let w = 412, h = 892;
+  const imposta = () => { f.width = w; f.height = h; };
+  document.querySelectorAll('button[data-w]').forEach(b => b.onclick = () => {
+    document.querySelectorAll('button[data-w]').forEach(x => x.classList.remove('attivo'));
+    b.classList.add('attivo');
+    w = +b.dataset.w; h = +b.dataset.h; imposta();
+  });
+  document.getElementById('ruota').onclick = () => { [w, h] = [h, w]; imposta(); };
+  document.getElementById('ricarica').onclick = () => f.contentWindow.location.reload();
+</script>
+</body>
+</html>

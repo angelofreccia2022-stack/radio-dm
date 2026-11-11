@@ -233,6 +233,19 @@
   #corniceAiuto { position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 2001;
                   background: rgba(0,0,0,.85); color: #ffcc00; font: 14px/1.4 system-ui, sans-serif;
                   padding: 8px 14px; border-radius: 10px; border: 1px solid #ffcc00; text-align: center; pointer-events: none; }
+  /* 11/11/2026: modalità "sposta tutto" anche col dito (telefono): barra di pulsanti */
+  body.cornice-edit .cornice-el { touch-action: none !important; }
+  #corniceBarra { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2003; padding: 10px 10px 14px;
+                  background: rgba(0,0,0,.94); border-top: 2px solid #ffcc00; font: 16px system-ui, sans-serif; color: #fff; }
+  #corniceBarra .titolo { text-align: center; margin-bottom: 8px; color: #ffcc00; font-weight: 600; }
+  #corniceBarra .riga { display: flex; gap: 8px; justify-content: center; }
+  #corniceBarra button { flex: 1; max-width: 140px; min-height: 56px; font: 600 15px system-ui, sans-serif;
+                         border-radius: 12px; border: 0; background: #333; color: #fff; touch-action: manipulation; }
+  #corniceBarra button .ico { display: block; font-size: 22px; line-height: 1.1; }
+  #corniceBarra button:disabled { opacity: .3; }
+  #corniceBarra button.fine { background: #2e7d32; }
+  @media (pointer: coarse) { #corniceAiuto { display: none !important; } }
+  @media (pointer: coarse) { .cornice-man { width: 30px !important; height: 30px !important; } }
 </style>
 </head>
 <body>
@@ -5041,6 +5054,7 @@ const Cornice = {
                       '<b>0</b> = misura originale<br><b>R</b> = rimetti tutto com\'era · <b>M</b> = fine (salva) ' +
                       '&nbsp; <span style="color:#aaa">[' + this._formato() + ']</span>';
     document.body.appendChild(aiuto);
+    this._barra();
     this.applicaTutti();                // i pezzi nascosti ricompaiono trasparenti
     this._aggiornaEtichette();
     log('✥ Modalità SPOSTA TUTTO (' + this._formato() + ')');
@@ -5048,12 +5062,82 @@ const Cornice = {
   spegni() {
     this.attiva = false;
     document.body.classList.remove('cornice-edit');
-    document.querySelectorAll('.cornice-nome, #corniceAiuto, .cornice-man').forEach(e => e.remove());
+    document.querySelectorAll('.cornice-nome, #corniceAiuto, #corniceBarra, .cornice-man').forEach(e => e.remove());
     this.PEZZI.forEach(([id]) => { const el = document.getElementById(id); if (el) el.classList.remove('cornice-el', 'cornice-sel'); });
     if (settings.mostraRotella === false) ['settingsBtn', 'layoutBtn'].forEach(id => { const b = document.getElementById(id); if (b) b.style.display = 'none'; });
     this._sel = null;
     this.applicaTutti();
     log('✥ Posizioni salvate');
+  },
+  /** Nasconde / mostra il pezzo selezionato (tasto H o pulsante "Nascondi"). */
+  nascondiSel() {
+    if (!this._sel) return;
+    if (!this._dati()[this._sel.id]) this._salvaUno(this._sel);
+    const d = this._dati()[this._sel.id];
+    d.nasc = !d.nasc;
+    if (!d.nasc) this._sel.classList.remove('cornice-nascosto');
+    salvaSettings();
+    this.applicaUno(this._sel);
+    log('✥ ' + this._sel.id + (d.nasc ? ' nascosto' : ' di nuovo visibile'));
+  },
+  /** Il pezzo selezionato torna alla misura originale (tasto 0 o pulsante "Originale"). */
+  originaleSel() {
+    if (!this._sel) return;
+    const d = this._dati()[this._sel.id];
+    if (d) { delete d.w; delete d.alt; d.s = 1; }
+    this._sel.style.width = ''; this._sel.style.height = '';
+    const b = this._sel.querySelector && this._sel.querySelector('button');
+    if (b) { b.style.width = ''; b.style.height = ''; }
+    this._salvaUno(this._sel, 1);
+    this._aggiornaEtichette();
+  },
+  /** 11/11/2026: sul telefono non c'è la tastiera → barra in basso con pulsanti grandi.
+   *  Finché non scegli un pezzo, i pulsanti sono spenti e la scritta spiega cosa fare. */
+  _barra() {
+    const vecchia = document.getElementById('corniceBarra');
+    if (vecchia) vecchia.remove();
+    const bar = document.createElement('div');
+    bar.id = 'corniceBarra';
+    bar.innerHTML = '<div class="titolo"></div><div class="riga"></div>';
+    const riga = bar.querySelector('.riga');
+    const voci = [
+      ['piu',  '➕', 'Più grande', () => this._scala(this._sel, 0.1)],
+      ['meno', '➖', 'Più piccolo', () => this._scala(this._sel, -0.1)],
+      ['nasc', '🙈', 'Nascondi', () => this.nascondiSel()],
+      ['orig', '↺', "Com'era", () => this.originaleSel()],
+      ['fine', '✔', 'Fatto', () => this.spegni()]
+    ];
+    voci.forEach(([id, ico, testo, fn]) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.dataset.id = id;
+      if (id === 'fine') b.className = 'fine';
+      b.innerHTML = '<span class="ico">' + ico + '</span><span class="txt">' + testo + '</span>';
+      b.addEventListener('pointerdown', (e) => e.stopPropagation());
+      b.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (id !== 'fine' && !this._sel) return;
+        fn();
+        this._aggiornaBarra();
+      });
+      riga.appendChild(b);
+    });
+    bar.addEventListener('pointerdown', (e) => e.stopPropagation());
+    document.body.appendChild(bar);
+    this._aggiornaBarra();
+  },
+  _aggiornaBarra() {
+    const bar = document.getElementById('corniceBarra');
+    if (!bar) return;
+    const nomi = Object.fromEntries(this.PEZZI);
+    const sel = this._sel;
+    bar.querySelector('.titolo').textContent = sel
+      ? 'Scelto: ' + (nomi[sel.id] || sel.id) + ' — trascinalo col dito per spostarlo'
+      : '👆 Tocca un pezzo dello schermo per sceglierlo';
+    bar.querySelectorAll('button').forEach(b => { if (b.dataset.id !== 'fine') b.disabled = !sel; });
+    const d = sel && this._dati()[sel.id];
+    const nasc = bar.querySelector('button[data-id="nasc"]');
+    nasc.querySelector('.ico').textContent = d && d.nasc ? '👁' : '🙈';
+    nasc.querySelector('.txt').textContent = d && d.nasc ? 'Mostra' : 'Nascondi';
   },
   rimetti() {
     if (!confirm('Rimettere tutto come all\'inizio (' + this._formato() + ')?')) return;
@@ -5119,6 +5203,7 @@ const Cornice = {
       document.querySelectorAll('.cornice-sel').forEach(x => x.classList.remove('cornice-sel'));
       el.classList.add('cornice-sel');
       this._sel = el;
+      this._aggiornaBarra();
       if (!this._dati()[el.id]) this._salvaUno(el);      // diventa "libero" al primo tocco
       const r = el.getBoundingClientRect();
       trascina = { el, dx: e.clientX - r.left, dy: e.clientY - r.top };
@@ -5186,28 +5271,8 @@ const Cornice = {
       if (!this.attiva) return;
       e.stopPropagation();
       if (e.key === 'r' || e.key === 'R') { e.preventDefault(); this.rimetti(); return; }
-      if (this._sel && (e.key === 'h' || e.key === 'H')) {
-        e.preventDefault();
-        if (!this._dati()[this._sel.id]) this._salvaUno(this._sel);
-        const d = this._dati()[this._sel.id];
-        d.nasc = !d.nasc;
-        if (!d.nasc) this._sel.classList.remove('cornice-nascosto');
-        salvaSettings();
-        this.applicaUno(this._sel);
-        log('✥ ' + this._sel.id + (d.nasc ? ' nascosto' : ' di nuovo visibile'));
-        return;
-      }
-      if (this._sel && e.key === '0') {
-        e.preventDefault();
-        const d = this._dati()[this._sel.id];
-        if (d) { delete d.w; delete d.alt; d.s = 1; }
-        this._sel.style.width = ''; this._sel.style.height = '';
-        const b = this._sel.querySelector && this._sel.querySelector('button');
-        if (b) { b.style.width = ''; b.style.height = ''; }
-        this._salvaUno(this._sel, 1);
-        this._aggiornaEtichette();
-        return;
-      }
+      if (this._sel && (e.key === 'h' || e.key === 'H')) { e.preventDefault(); this.nascondiSel(); return; }
+      if (this._sel && e.key === '0') { e.preventDefault(); this.originaleSel(); return; }
       if (e.key === 'Escape') { e.preventDefault(); this.spegni(); return; }
       if (this._sel && (e.key === '+' || e.key === '=')) { e.preventDefault(); this._scala(this._sel, 0.05); }
       if (this._sel && (e.key === '-' || e.key === '_')) { e.preventDefault(); this._scala(this._sel, -0.05); }
@@ -5276,12 +5341,9 @@ function tieniPremuto(el, ms, azione) {
 
 function initLayoutPulsanti() {
   const layoutBtn = document.getElementById('layoutBtn');
+  // 11/11/2026: ↔️ tenuto premuto 3 s = come il tasto M (serve sul telefono, senza tastiera).
   tieniPremuto(layoutBtn, 3000, () => {
-    document.body.classList.toggle('layout-edit');
-    layoutBtn.classList.toggle('attivo');
-    log(document.body.classList.contains('layout-edit')
-      ? '🔧 Modalità sposta pulsanti attiva'
-      : '🔧 Modalità sposta pulsanti disattivata');
+    if (Cornice.attiva) Cornice.spegni(); else Cornice.accendi();
   });
 
   document.querySelectorAll('.pulsante-wrap').forEach((wrap) => {

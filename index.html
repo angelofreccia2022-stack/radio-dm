@@ -389,14 +389,14 @@ const DEFAULT_SETTINGS = {
   comandiNo: 'no\nniente\nsbagliato\nnon è giusto\nrifai\nripeti\ncambia\naspetta\nannulla',               // non più usata (7.11)
   comandiConversazione: 'come stai\ncome va\nchi sei\ncosa sei\ncosa puoi fare\nraccontami qualcosa\nraccontami una storia\nraccontami una barzelletta\nparliamo\nfacciamo due chiacchiere\nciao asia\nbuongiorno asia\nbuonasera asia',
 
-  comandiSalta: 'salta\navanti\nprossima\nsuccessiva\nnext\nla prossima\nvai avanti',
+  comandiSalta: 'salta\navanti\nprossima\nsuccessiva\nnext\nla prossima\nvai avanti\npassa all\'altra\npassa alla prossima\npassa oltre\npassa\ncambia\ncambia canzone\ncambiala\nquesta no\nnon questa\nla prossima canzone',
   comandiIndietro: 'indietro\ntorna indietro\nvai indietro\nprecedente\nquella prima\nquella di prima',
   comandiVolumeSu: 'più forte\nalza\nalza il volume\nvolume su\npiù alto\nalzalo',
   comandiVolumeGiu: 'più piano\nabbassa\nabbassa il volume\nvolume giù\npiù basso\nabbassalo',
   comandiPausa: 'pausa\nmetti in pausa\nfai una pausa',
   comandiRiprendi: 'riprendi\ncontinua\nriparti\nplay\nfai ripartire',
   comandiDiNuovo: 'di nuovo\nrimetti\nrimettila\nridammela\nda capo\nricomincia\nancora quella\nancora una volta',
-  comandiUnAltra: "un'altra\naltra\nun altro\naltro\ndella stessa\ndello stesso",
+  comandiUnAltra: "un'altra\naltra\nun altro\naltro\ndella stessa\ndello stesso\nmetti un'altra\nmettine un'altra\ndammi un'altra\nfammi sentire un'altra",
   comandiInfo: "che canzone è\nche canzone era\nche canzone\nche brano è\nche brano\nchi canta\nchi la canta\ncome si chiama\ncome si intitola\ncosa sta suonando\ncos'è questa\ninfo\ninformazioni"
 };
 
@@ -423,6 +423,23 @@ function salvaSettings() {
  *  Serve perché il merge di caricaSettings() fa vincere le impostazioni salvate:
  *  sul tablet "pausa" resterebbe tra i comandi di stop, contro la decisione 7.9.
  *  Legge la versione direttamente dal salvataggio grezzo (non dai default). */
+/** 11/11/2026: Domenico dice "passa all'altra", "cambia", "questa no"... e prima ASIA
+ *  le cercava su YouTube come titoli (100 unità sprecate). Le aggiunge UNA volta ai
+ *  comandi salvati (le impostazioni salvate vincono sui default, vedi caricaSettings). */
+function migraComandiCambia() {
+  if (settings.comandiCambia11nov) return;
+  const aggiungi = (chiave, nuove) => {
+    const righe = String(settings[chiave] || '').split('\n').filter(r => r.trim());
+    const gia = new Set(righe.map(r => normalizza(r)));
+    nuove.forEach(n => { if (!gia.has(normalizza(n))) righe.push(n); });
+    settings[chiave] = righe.join('\n');
+  };
+  aggiungi('comandiSalta', ["passa all'altra", 'passa alla prossima', 'passa oltre', 'passa', 'cambia', 'cambia canzone', 'cambiala', 'questa no', 'non questa', 'la prossima canzone']);
+  aggiungi('comandiUnAltra', ["metti un'altra", "mettine un'altra", "dammi un'altra", "fammi sentire un'altra"]);
+  settings.comandiCambia11nov = true;
+  salvaSettings();
+}
+
 function migraSettingsV2() {
   let grezze = null;
   try { grezze = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch (e) { grezze = null; }
@@ -3034,6 +3051,49 @@ const Coda = {
   _erroriDiFila: 0,
   _continuazione: 'nessuna',      // 'nessuna' | 'in_corso' | 'fatta'
   _avviaAppenaPronta: false,
+  // 11/11/2026: RICERCA "PIGRA". Le canzoni proposte da Gemini non si cercano più tutte
+  // subito su YouTube (100 unità l'una!): restano qui e se ne cerca UNA alla volta,
+  // tenendone sempre una sola pronta in anticipo. Domenico cambia spesso: niente sprechi.
+  daCercare: [],
+  _riempiPromessa: null,
+
+  /** true se ci sono ancora canzoni di Gemini da cercare (o una ricerca in corso). */
+  haDaCercare() { return this.daCercare.length > 0 || !!this._riempiPromessa; },
+
+  /** Cerca su YouTube la prossima canzone di daCercare e la aggiunge in fondo alla coda.
+   *  Al massimo 3 tentativi per chiamata. @returns {Promise<boolean>} true se ne ha aggiunta una. */
+  riempi() {
+    if (this._riempiPromessa) return this._riempiPromessa;
+    if (!this.daCercare.length) return Promise.resolve(false);
+    if (Consumi._dati().ytFinito) { this.daCercare = []; return Promise.resolve(false); }
+    const versione = this._versione;
+    this._riempiPromessa = (async () => {
+      try {
+        let tentativi = 0;
+        while (this.daCercare.length && tentativi < 3) {
+          tentativi++;
+          const b = this.daCercare.shift();
+          const trovati = await ListaDaGemini.cercaSuYouTube([b]);
+          if (versione !== this._versione) return false;
+          const escludi = Memoria.idSaltatiValidi();
+          Memoria.braniSessione.forEach(id => escludi.add(id));
+          this.brani.forEach(x => escludi.add(x.id));
+          const nuovo = trovati.find(x => !escludi.has(x.id) && !Memoria.titoliSessione.has(Ricerca.chiaveTitolo(x)));
+          if (nuovo) {
+            this.brani.push(nuovo);
+            log('📃 Pronta la prossima: ' + pulisciTitolo(nuovo.titolo) + ' (ancora ' + this.daCercare.length + ' da cercare)');
+            return true;
+          }
+        }
+        return false;
+      } catch (e) {
+        return false;
+      } finally {
+        if (versione === this._versione) this._riempiPromessa = null;
+      }
+    })();
+    return this._riempiPromessa;
+  },
 
   /** Imposta una nuova coda (non parte finché non si chiama prossima()). */
   imposta(brani, origine) {
@@ -3067,6 +3127,8 @@ const Coda = {
     const b = this.brani[this.indice];
     Player.riproduci(b);
     Sessione.logStato();
+    // ricerca pigra: mentre questa suona, prepara (solo) la prossima
+    if (!this.haAltri() && this.daCercare.length) this.riempi();
     return b;
   },
 
@@ -3084,7 +3146,21 @@ const Coda = {
   suFinita(brano) {
     Memoria.registraFine(brano, brano && brano.durataSec);
     this._erroriDiFila = 0;
+    this._avanti();
+  },
+
+  /** Passa alla prossima; se non è ancora pronta ma ce ne sono da cercare, la cerca prima. */
+  _avanti() {
     if (this.haAltri()) { Suoni.salto(); this.prossima(); return; }
+    if (this.haDaCercare()) {
+      const v = this._versione;
+      this.riempi().then(ok => {
+        if (v !== this._versione) return;
+        if (!ok) this.daCercare = [];
+        this._avanti();
+      });
+      return;
+    }
     if (this.origine === 'brano' && this._continuazione !== 'fatta') {
       // 7.6: dopo un brano preciso si continua con lo stesso artista.
       this._avviaAppenaPronta = true;
@@ -3117,6 +3193,15 @@ const Coda = {
       return;
     }
     if (this.haAltri()) { this.prossima(); return; }
+    if (this.haDaCercare()) {
+      const v = this._versione;
+      this.riempi().then(ok => {
+        if (v !== this._versione) return;
+        if (ok && this.haAltri()) this.prossima();
+        else Voce.parla("Questo video non si può sentire, prova un'altra ricerca.");
+      });
+      return;
+    }
     Voce.parla("Questo video non si può sentire, prova un'altra ricerca.");
   },
 
@@ -3152,12 +3237,19 @@ const Coda = {
         // costa 100 unità di quota (vedi nota sopra in _eseguiLista). Non
         // serve cercarle tutte e 8 subito — se la coda si svuota ancora,
         // questa funzione viene richiamata di nuovo.
-        const daVerificare = brani.slice(0, 4);
-        const trovati = await ListaDaGemini.cercaSuYouTube(daVerificare);
-        if (versione !== this._versione) return;
-        const nuovi = trovati.filter(b => !escludi.has(b.id) && !escludiTitoli.has(Ricerca.chiaveTitolo(b)));
+        // 11/11/2026: ricerca pigra: se ne cerca UNA (max 3 tentativi), le altre
+        // restano in daCercare e si cercano una alla volta solo se servono.
+        let nuovi = [];
+        let i = 0;
+        while (i < brani.length && i < 3 && !nuovi.length) {
+          const trovati = await ListaDaGemini.cercaSuYouTube([brani[i]]);
+          i++;
+          if (versione !== this._versione) return;
+          nuovi = trovati.filter(b => !escludi.has(b.id) && !escludiTitoli.has(Ricerca.chiaveTitolo(b)));
+        }
         if (nuovi.length) {
-          this.brani.push(...nuovi);
+          this.brani.push(nuovi[0]);
+          this.daCercare = brani.slice(i);
           this._continuazione = 'fatta';
           log('📃 Aggiunti ' + nuovi.length + ' brani simili (Gemini)');
           this._seAttesaAvvia();
@@ -3195,6 +3287,8 @@ const Coda = {
 
   _nuovaVersione() {
     this._versione++;
+    this.daCercare = [];
+    this._riempiPromessa = null;
     this._erroriDiFila = 0;
     this._continuazione = 'nessuna';
     this._avviaAppenaPronta = false;
@@ -3982,34 +4076,30 @@ const ListaDaGemini = {
     if (mioId !== Esecutore._idRichiesta) return true;
     if (errore === 'chiave_mancante' || !brani.length) return false;
     setStatus('Preparo le canzoni...');
-    // 11/11/2026: le prime 3 subito (parte prima), le altre (fino a 8) in sottofondo
-    // mentre suona: Domenico salta spesso e trova sempre la prossima pronta.
+    // 11/11/2026 (ricerca pigra): si cerca su YouTube SOLO la prima canzone (max 3 tentativi
+    // se non si trova); le altre restano in Coda.daCercare e si cercano una alla volta,
+    // sempre una pronta in anticipo. Prima: 8 ricerche = 800 unità a ogni "a piacere".
     const escludi = Memoria.idSaltatiValidi();
     Memoria.braniSessione.forEach(id => escludi.add(id));
-    const trovati = (await this.cercaSuYouTube(brani.slice(0, 3))).filter(b => !escludi.has(b.id));
-    if (mioId !== Esecutore._idRichiesta) return true;
+    let trovati = [];
+    let usate = 0;
+    while (usate < brani.length && usate < 3 && !trovati.length) {
+      trovati = (await this.cercaSuYouTube([brani[usate]])).filter(b => !escludi.has(b.id));
+      usate++;
+      if (mioId !== Esecutore._idRichiesta) return true;
+    }
     if (!trovati.length) {
       Suoni.errore();
       await Voce.parla('Non ho trovato canzoni adatte, riprova tra poco.');
       return true;
     }
-    Coda.imposta(trovati, 'playlist');
-    const versioneCoda = Coda._versione;
+    Coda.imposta(trovati.slice(0, 1), 'playlist');
+    Coda.daCercare = brani.slice(usate);          // le altre: si cercano solo se servono
     await Attesa.finisci();
     if (mioId !== Esecutore._idRichiesta) return true;
     await Voce.parla(Annunci.apertura(trovati[0]));
     if (mioId !== Esecutore._idRichiesta) return true;
-    Coda.prossima();
-    // le altre in sottofondo
-    const resto = brani.slice(3, 8);
-    if (resto.length) {
-      this.cercaSuYouTube(resto).then(altri => {
-        if (Coda._versione !== versioneCoda) return;      // nel frattempo ha chiesto altro
-        const visti = new Set(Coda.brani.map(b => b.id));
-        const nuovi = altri.filter(b => !escludi.has(b.id) && !visti.has(b.id));
-        if (nuovi.length) { Coda.brani.push(...nuovi); log('📃 Aggiunte ' + nuovi.length + ' canzoni in coda (in sottofondo)'); }
-      }).catch(() => {});
-    }
+    Coda.prossima();                               // parte e prepara (solo) la prossima
     return true;
   },
 
@@ -4109,7 +4199,7 @@ const Esecutore = {
 
       case 'UN_ALTRA':
         // 7.5: se la coda ha altri brani è come "salta".
-        if (Coda.haAltri()) return this._salta();
+        if (Coda.haAltri() || Coda.haDaCercare()) return this._salta();
         return this._unAltraDaRicerca();
 
       case 'INFO': {
@@ -4146,7 +4236,7 @@ const Esecutore = {
         Memoria.registraSalto(brano, 0);   // non rientra nelle code per 30 giorni
         Suoni.ricevuto();
         return Voce.parla(cera ? 'Tolta dai preferiti.' : 'Va bene, non te la rimetto.').then(() => {
-          if (Coda.haAltri()) return this._salta();
+          if (Coda.haAltri() || Coda.haDaCercare()) return this._salta();
           if (Player.stato() === 'pausa') Player.stop();
         });
       }
@@ -4494,9 +4584,13 @@ const Esecutore = {
   /** true se una ricerca o una chat è in corso (serve al pulsante STOP). */
   occupato() { return this._occupato > 0; },
 
-  _salta() {
+  async _salta() {
     this._registraSaltoCorrente();
     if (Coda.haAltri()) { Suoni.salto(); Coda.prossima(); return; }
+    if (Coda.haDaCercare()) {
+      const ok = await Coda.riempi();
+      if (ok && Coda.haAltri()) { Suoni.salto(); Coda.prossima(); return; }
+    }
     // Coda finita: "salta" si comporta come "un'altra".
     return this._unAltraDaRicerca();
   },
@@ -4838,7 +4932,7 @@ const Gesti = {
       const n = this._tocchi;
       this._tocchi = 0; this._timerTocchi = null;
       if (n >= 3 && suTre) { log('👆 ' + fonte + ': 3 colpi'); suTre(); return; }
-      if (n >= 2 && Sessione.attiva && (Player.stato() !== 'fermo' || Coda.haAltri())) {
+      if (n >= 2 && Sessione.attiva && (Player.stato() !== 'fermo' || Coda.haAltri() || Coda.haDaCercare())) {
         log('👆 ' + fonte + ': due colpi → salta');
         Esecutore.eseguiComando({ azione: 'SALTA' });
         return;
@@ -5900,6 +5994,7 @@ document.getElementById('importSettings').onclick = () => {
       try {
         const obj = JSON.parse(r.result);
         settings = { ...DEFAULT_SETTINGS, ...obj };
+        delete settings.comandiCambia11nov; migraComandiCambia();
         salvaSettings();
         applicaStili();
         costruisciPannello();
@@ -6048,6 +6143,7 @@ const Licenza = {
 Listener.suFrase = (frase) => Esecutore.riceviFrase(frase);   // un solo destinatario
 migraSettingsV2();
 migraSettingsV3();
+migraComandiCambia();
 Memoria.carica();
 applicaStili();
 applicaLayoutPulsanti();

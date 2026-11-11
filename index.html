@@ -3255,6 +3255,16 @@ const VuMeter = {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof AudioContext === 'undefined') return;
     this._avviato = true;
     this._creaCanvas();
+    // 11/11/2026: su Android il microfono può usarlo UN solo programma alla volta.
+    // Se il VU-meter lo prende con getUserMedia, il riconoscimento vocale riceve solo
+    // silenzio (sente il volumetro ma ASIA non capisce nulla). Su Android quindi niente
+    // getUserMedia: il VU-meter si muove solo quando ASIA riceve parole (sentito()).
+    if (/Android/i.test(navigator.userAgent || '')) {
+      log('🎚️ VU-meter in modalità telefono (non occupa il microfono)');
+      const cicloA = () => { this._disegna(); requestAnimationFrame(cicloA); };
+      requestAnimationFrame(cicloA);
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: false } });
       this._ctx = new AudioContext();
@@ -3299,7 +3309,10 @@ const VuMeter = {
   },
 
   _livelloVU() {
-    if (!this._an) return -20;
+    if (!this._an) {
+      // Modalità telefono: livello "finto" mentre arrivano parole, fermo altrimenti.
+      return Date.now() < this._sentitoFino ? (-6 + Math.random() * 8) : -20;
+    }
     this._an.getFloatTimeDomainData(this._buf);
     let somma = 0;
     for (let i = 0; i < this._buf.length; i++) somma += this._buf[i] * this._buf[i];

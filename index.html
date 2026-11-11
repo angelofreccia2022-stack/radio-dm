@@ -245,6 +245,14 @@
   #corniceBarra button:disabled { opacity: .3; }
   #corniceBarra button.fine { background: #2e7d32; }
   @media (pointer: coarse) { #corniceAiuto { display: none !important; } }
+  #corniceBarra.su { top: 0; bottom: auto; border-top: 0; border-bottom: 2px solid #ffcc00; padding: 14px 10px 10px; }
+  #corniceBarra .titolo { display: flex; align-items: center; justify-content: center; gap: 10px; }
+  #corniceBarra .titolo button.giro { flex: 0 0 auto; max-width: none; min-height: 40px; padding: 0 12px;
+                                      background: #ffcc00; color: #111; font-size: 15px; }
+  /* 11/11/2026: sul telefono la pagina non scorre (niente barra su/giù): è un'app, non un sito */
+  @media (pointer: coarse) {
+    html, body { overflow: hidden !important; height: 100%; min-height: 0; overscroll-behavior: none; }
+  }
   @media (pointer: coarse) { .cornice-man { width: 30px !important; height: 30px !important; } }
 </style>
 </head>
@@ -5098,7 +5106,10 @@ const Cornice = {
     if (vecchia) vecchia.remove();
     const bar = document.createElement('div');
     bar.id = 'corniceBarra';
-    bar.innerHTML = '<div class="titolo"></div><div class="riga"></div>';
+    bar.innerHTML = '<div class="titolo"><span class="scritta"></span><button type="button" class="giro">⇅ Sposta barra</button></div><div class="riga"></div>';
+    const giro = bar.querySelector('.giro');
+    giro.addEventListener('pointerdown', (e) => e.stopPropagation());
+    giro.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); bar.classList.toggle('su'); });
     const riga = bar.querySelector('.riga');
     const voci = [
       ['piu',  '➕', 'Più grande', () => this._scala(this._sel, 0.1)],
@@ -5130,9 +5141,9 @@ const Cornice = {
     if (!bar) return;
     const nomi = Object.fromEntries(this.PEZZI);
     const sel = this._sel;
-    bar.querySelector('.titolo').textContent = sel
-      ? 'Scelto: ' + (nomi[sel.id] || sel.id) + ' — trascinalo col dito per spostarlo'
-      : '👆 Tocca un pezzo dello schermo per sceglierlo';
+    bar.querySelector('.scritta').textContent = sel
+      ? 'Scelto: ' + (nomi[sel.id] || sel.id) + ' — trascinalo col dito'
+      : '👆 Tocca un pezzo per sceglierlo';
     bar.querySelectorAll('button').forEach(b => { if (b.dataset.id !== 'fine') b.disabled = !sel; });
     const d = sel && this._dati()[sel.id];
     const nasc = bar.querySelector('button[data-id="nasc"]');
@@ -5204,6 +5215,11 @@ const Cornice = {
       el.classList.add('cornice-sel');
       this._sel = el;
       this._aggiornaBarra();
+      const barra = document.getElementById('corniceBarra');
+      if (barra) {
+        const rr = el.getBoundingClientRect();
+        barra.classList.toggle('su', (rr.top + rr.height / 2) > innerHeight / 2);   // pezzo in basso → barra in alto
+      }
       if (!this._dati()[el.id]) this._salvaUno(el);      // diventa "libero" al primo tocco
       const r = el.getBoundingClientRect();
       trascina = { el, dx: e.clientX - r.left, dy: e.clientY - r.top };

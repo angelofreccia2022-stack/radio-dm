@@ -2685,8 +2685,11 @@ const CanzoniTelefono = {
     const voceBtn = document.createElement('button');
     voceBtn.textContent = '⬇️ Prepara la voce senza internet';
     voceBtn.style.cssText = stileBtn + 'align-self:flex-start;';
+    const voceDett = document.createElement('div');
+    voceDett.style.cssText = 'font-size:13px;color:#bbbbbb;';
     const scriviVoce = () => {
       voceStato.textContent = VoceOffline.descrizione();
+      voceDett.textContent = VoceOffline.dettaglio ? 'Dettagli per Claude: ' + VoceOffline.dettaglio : '';
       voceBtn.style.display = (VoceOffline.stato === 'scaricabile' || VoceOffline.stato === 'non_disponibile') ? '' : 'none';
       voceBtn.disabled = false;
     };
@@ -2696,7 +2699,7 @@ const CanzoniTelefono = {
       await VoceOffline.installa();
       scriviVoce();
     };
-    box.appendChild(voceTit); box.appendChild(voceStato); box.appendChild(voceBtn);
+    box.appendChild(voceTit); box.appendChild(voceStato); box.appendChild(voceDett); box.appendChild(voceBtn);
     scriviVoce();
     VoceOffline.controlla().then(scriviVoce);
 
@@ -2878,8 +2881,15 @@ const VoceOffline = {
       const s = await SR.available(this.OPZ);
       this.stato = s === 'available' ? 'disponibile' : s === 'downloadable' ? 'scaricabile'
                  : s === 'downloading' ? 'in_scaricamento' : 'non_disponibile';
+      // 20/11/2026: diario per capire il telefono (italiano e, per confronto, inglese)
+      const ch = (typeof navigator !== 'undefined' && String(navigator.userAgent || '').match(/Chrome\/(\d+)/)) || [];
+      let en = '?';
+      try { en = await SR.available({ langs: ['en-US'], processLocally: true }); } catch (e) { en = 'errore'; }
+      this.dettaglio = 'Chrome ' + (ch[1] || '?') + ' · italiano: ' + s + ' · inglese: ' + en;
+      log('🎤 Voce senza internet: ' + this.dettaglio);
     } catch (e) {
       this.stato = 'non_supportato';
+      this.dettaglio = 'errore: ' + (e && e.message);
       log('🎤 Voce senza internet: controllo non riuscito (' + (e && e.message) + ')');
     }
     return this.stato;

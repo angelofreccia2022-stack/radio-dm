@@ -1217,6 +1217,12 @@ const Listener = {
     r.continuous = true;
     r.interimResults = true;
     r.maxAlternatives = 5;       // 5 e non 8: meno falsi positivi (R5)
+    // 20/11/2026: senza internet si usa la voce "sul telefono" (se Chrome ce l'ha)
+    this._locale = VoceOffline.daUsare();
+    if (this._locale) {
+      try { r.processLocally = true; } catch (e) {}
+      log('🎤 Microfono SENZA internet');
+    }
     this.r = r;
     this.generazione++;
     this._resetSegmentatore();
@@ -1354,6 +1360,15 @@ const Listener = {
       this._chiudi();
       Sessione.termina('errore_microfono');
     }
+    if ((err === 'language-not-supported' || err === 'service-not-allowed') && this._locale) {
+      // 20/11/2026: Chrome diceva di avere la voce senza internet, ma non la usa
+      log('🎤 La voce senza internet non funziona su questo telefono: torno a quella normale');
+      VoceOffline._forza = false;
+      VoceOffline.stato = 'non_disponibile';
+      this._chiudi();
+      this._bloccaPer(1000);
+      return;
+    }
     if (err === 'network') {
       // 10/11/2026: il servizio di Google che capisce la voce non risponde. Riprovare
       // subito sulla stessa istanza non serve (e il microfono restava "morto"): si chiude,
@@ -1361,11 +1376,21 @@ const Listener = {
       this._erroriRete = (this._erroriRete || 0) + 1;
       this._chiudi();
       this.bloccato = true;
+      // 20/11/2026: se il telefono sa capire la voce senza internet, si riapre subito così
+      if (VoceOffline.passaAlLocale()) {
+        this._erroriRete = 0;
+        this._bloccaPer(300);
+        return;
+      }
       const attesa = Math.min(8000, 1000 * Math.pow(2, this._erroriRete - 1));
       if (this._erroriRete === 3) {
         Suoni.errore();
         setStatus('⚠️ Non riesco a collegarmi al servizio che capisce la voce. Controlla internet (o la VPN).');
         log('⚠️ Riconoscimento vocale: 3 errori di rete di fila. Internet c\'è? VPN accesa?');
+        // 20/11/2026: Domenico non vede la scritta: glielo dice ASIA (una volta sola)
+        if (Sessione.attiva && Player.stato() !== 'suona') {
+          try { Voce.parla(senzaInternet() ? 'Senza internet non riesco a capire la voce.' : 'Non riesco a capire la voce, internet non va.'); } catch (e) {}
+        }
       }
       this._bloccaPer(attesa);      // stesso timer del freno R8 (unico modo ammesso di riaprire)
       return;
@@ -2651,6 +2676,30 @@ const CanzoniTelefono = {
     lista.style.cssText = 'max-height:260px;overflow-y:auto;border:1px solid #444;border-radius:8px;background:#141414;';
     box.appendChild(info); box.appendChild(riga); box.appendChild(stato); box.appendChild(lista);
 
+    // 20/11/2026: voce senza internet (per chiedere queste canzoni anche in modalità aereo)
+    const voceTit = document.createElement('div');
+    voceTit.style.cssText = 'font-size:15px;color:#f0f0f0;margin-top:10px;font-weight:bold;';
+    voceTit.textContent = '🎤 Voce senza internet (per chiedere queste canzoni anche senza internet)';
+    const voceStato = document.createElement('div');
+    voceStato.style.cssText = 'font-size:15px;color:#ffd970;';
+    const voceBtn = document.createElement('button');
+    voceBtn.textContent = '⬇️ Prepara la voce senza internet';
+    voceBtn.style.cssText = stileBtn + 'align-self:flex-start;';
+    const scriviVoce = () => {
+      voceStato.textContent = VoceOffline.descrizione();
+      voceBtn.style.display = (VoceOffline.stato === 'scaricabile' || VoceOffline.stato === 'non_disponibile') ? '' : 'none';
+      voceBtn.disabled = false;
+    };
+    voceBtn.onclick = async () => {
+      voceBtn.disabled = true;
+      voceStato.textContent = VoceOffline.descrizione.call({ stato: 'in_scaricamento' });
+      await VoceOffline.installa();
+      scriviVoce();
+    };
+    box.appendChild(voceTit); box.appendChild(voceStato); box.appendChild(voceBtn);
+    scriviVoce();
+    VoceOffline.controlla().then(scriviVoce);
+
     const scriviElenco = () => {
       const n = this.elenco.length;
       info.textContent = n ? '🎵 ' + n + (n === 1 ? ' canzone' : ' canzoni') + ' nella memoria di ASIA.' : '🎵 Nessuna canzone ancora.';
@@ -2798,6 +2847,99 @@ async function leggiTagAudio(file) {
     const coda = file.size > 128 ? new Uint8Array(await file.slice(file.size - 128).arrayBuffer()) : null;
     return leggiID3(testa, coda);
   } catch (e) { return { titolo: '', autore: '' }; }
+}
+
+/** 20/11/2026: true se il telefono è senza internet (modalità aereo, niente campo). */
+function senzaInternet() {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
+// ------------------------------------------------------------
+// 10g. VOCE SENZA INTERNET (20/11/2026)
+// ------------------------------------------------------------
+// Domenico non vede: deve poter chiedere le canzoni del telefono A VOCE anche senza
+// internet. Chrome (dalla versione 139) sa capire la voce "sul dispositivo" se ha il
+// pacchetto della lingua. Qui: si controlla se c'è, lo si scarica (dal menu, oppure da
+// solo premendo AVVIA quando non si consumano dati della SIM) e, quando manca internet,
+// il microfono lavora in quel modo. Se il telefono non lo permette, il menu lo dice.
+const VoceOffline = {
+  stato: 'sconosciuto',   // 'non_supportato' | 'disponibile' | 'scaricabile' | 'in_scaricamento' | 'non_disponibile'
+  _forza: false,          // true dopo errori di rete: la prossima apertura del microfono va senza internet
+  _installando: null,
+  OPZ: { langs: ['it-IT'], processLocally: true },
+
+  _SR() { return (typeof window !== 'undefined') && (window.SpeechRecognition || window.webkitSpeechRecognition); },
+
+  /** Chiede a Chrome se capisce l'italiano senza internet. @returns {Promise<string>} */
+  async controlla() {
+    const SR = this._SR();
+    if (!SR || typeof SR.available !== 'function') { this.stato = 'non_supportato'; return this.stato; }
+    try {
+      const s = await SR.available(this.OPZ);
+      this.stato = s === 'available' ? 'disponibile' : s === 'downloadable' ? 'scaricabile'
+                 : s === 'downloading' ? 'in_scaricamento' : 'non_disponibile';
+    } catch (e) {
+      this.stato = 'non_supportato';
+      log('🎤 Voce senza internet: controllo non riuscito (' + (e && e.message) + ')');
+    }
+    return this.stato;
+  },
+
+  /** Scarica il pacchetto italiano (serve internet). @returns {Promise<string>} lo stato dopo */
+  installa() {
+    if (this._installando) return this._installando;
+    const SR = this._SR();
+    if (!SR || typeof SR.install !== 'function') { this.stato = 'non_supportato'; return Promise.resolve(this.stato); }
+    this._installando = (async () => {
+      try {
+        log('🎤 Scarico la voce italiana per usare ASIA senza internet...');
+        this.stato = 'in_scaricamento';
+        const ok = await SR.install(this.OPZ);
+        log('🎤 Voce senza internet: ' + (ok ? 'scaricata' : 'NON scaricata'));
+      } catch (e) {
+        log('🎤 Voce senza internet: download non riuscito (' + (e && e.message) + ')');
+      }
+      await this.controlla();
+      this._installando = null;
+      return this.stato;
+    })();
+    return this._installando;
+  },
+
+  /** Premuto AVVIA: se il pacchetto manca e non si consumano dati della SIM, lo scarica. */
+  preparaInSilenzio() {
+    this.controlla().then(s => {
+      if (s === 'scaricabile' && !senzaInternet() && !risparmiaDati()) this.installa();
+    });
+  },
+
+  /** true se il microfono che sta per aprirsi deve lavorare senza internet. */
+  daUsare() { return this.stato === 'disponibile' && (this._forza || senzaInternet()); },
+
+  /** Il servizio della voce su internet non risponde: proviamo senza. @returns {boolean} se si può */
+  passaAlLocale() {
+    if (this.stato !== 'disponibile' || this._forza) return false;
+    this._forza = true;
+    log('🎤 Internet non risponde: il microfono passa alla voce SENZA internet');
+    return true;
+  },
+
+  /** Testo per il menu. */
+  descrizione() {
+    return {
+      sconosciuto: '⏳ Controllo in corso...',
+      non_supportato: '❌ Questo Chrome NON sa capire la voce senza internet. Aggiorna Chrome dal Play Store e riprova.',
+      disponibile: '✅ Pronta: ASIA capisce la voce anche SENZA internet.',
+      scaricabile: '⬇️ Si può fare: premi il pulsante qui sotto (con il Wi-Fi) per scaricare la voce italiana.',
+      in_scaricamento: '⏳ Sto scaricando la voce italiana... lascia ASIA aperta col Wi-Fi.',
+      non_disponibile: '❌ Su questo telefono Chrome non ha la voce italiana senza internet.'
+    }[this.stato] || this.stato;
+  }
+};
+if (typeof window !== 'undefined' && window.addEventListener) {
+  // tornato internet: il microfono torna normale (è più preciso)
+  window.addEventListener('online', () => { if (VoceOffline._forza) { VoceOffline._forza = false; log('🌐 Internet tornato'); } });
+  window.addEventListener('offline', () => log('📴 Internet assente: solo canzoni del telefono'));
 }
 
 /** "metti le canzoni del telefono", "le mie mp3", "la musica scaricata" → true. */
@@ -3574,6 +3716,8 @@ const Coda = {
       });
       return;
     }
+    // 20/11/2026: senza internet si continua con le altre canzoni del telefono
+    if (senzaInternet() && this._continuaColTelefono()) { Suoni.salto(); this.prossima(); return; }
     if (this.origine === 'brano' && this._continuazione !== 'fatta') {
       // 7.6: dopo un brano preciso si continua con lo stesso artista.
       this._avviaAppenaPronta = true;
@@ -3682,6 +3826,18 @@ const Coda = {
     this._continuazione = 'fatta';
     log('📃 Aggiunti ' + nuovi.length + ' brani di ' + artista);
     this._seAttesaAvvia();
+  },
+
+  /** 20/11/2026: aggiunge in coda (mescolate) le canzoni del telefono non ancora sentite
+   *  in questa sessione. @returns {boolean} true se ne ha aggiunta almeno una. */
+  _continuaColTelefono() {
+    const gia = new Set(Memoria.braniSessione);
+    this.brani.forEach(b => gia.add(b.id));
+    const altre = CanzoniTelefono.tutte().filter(b => !gia.has(b.id)).slice(0, 20);
+    if (!altre.length) return false;
+    this.brani.push(...altre);
+    log('📴 Senza internet: continuo con ' + altre.length + ' canzoni del telefono');
+    return true;
   },
 
   _seAttesaAvvia() {
@@ -4800,6 +4956,8 @@ const Esecutore = {
       let giaSentita = !origineAltra && Storico.trova(query);
       // 20/11/2026: una canzone del telefono tolta dal menu non si può più rimettere da qui
       if (giaSentita && CanzoniTelefono.eMp3(giaSentita) && !CanzoniTelefono.ha(giaSentita.id)) giaSentita = null;
+      // senza internet un video di YouTube non può suonare
+      if (giaSentita && !CanzoniTelefono.eMp3(giaSentita) && senzaInternet()) giaSentita = null;
       if (giaSentita) {
         log('🗂️ Già suonata, la rimetto senza cercare: ' + pulisciTitolo(giaSentita.titolo));
         const b = Preferiti._copia(giaSentita);
@@ -4812,6 +4970,8 @@ const Esecutore = {
         Coda.prossima();
         return;
       }
+      // 20/11/2026: senza internet YouTube non suona (nemmeno le ricerche ricordate): lo si dice subito
+      if (senzaInternet()) { Attesa.ferma(); this._avvisaErroreRicerca('rete', query); return; }
       let { risultati, errore } = await Ricerca.cerca(query, 'riproduci');
       if (mioId !== this._idRichiesta) return;
       if (errore === 'chiave_mancante') { this._avvisaErroreRicerca(errore, query); return; }
@@ -4899,7 +5059,8 @@ const Esecutore = {
     await CanzoniTelefono.carica();
     if (mioId !== this._idRichiesta) return;
     // 20/11/2026: senza le canzoni del telefono tolte dal menu
-    const brani = Preferiti.elenco().filter(v => !CanzoniTelefono.eMp3(v) || CanzoniTelefono.ha(v.id))
+    // senza internet: solo i preferiti che sono canzoni del telefono
+    const brani = Preferiti.elenco().filter(v => CanzoniTelefono.eMp3(v) ? CanzoniTelefono.ha(v.id) : !senzaInternet())
       .map(v => Preferiti._copia(v));
     if (!brani.length) {
       Suoni.errore();
@@ -5084,6 +5245,12 @@ const Esecutore = {
     }
     if (errore === 'quota') return Voce.parla('Per oggi ho finito le ricerche su YouTube. Puoi ascoltare i tuoi preferiti, oppure riproviamo domani.');
     if (errore === 'limite') return Voce.parla('YouTube mi chiede di aspettare un pochino. Riprova tra un minuto.');
+    // 20/11/2026: senza internet si può solo il telefono: dirlo chiaro (Domenico non vede)
+    if (errore === 'rete' && senzaInternet()) {
+      return Voce.parla(CanzoniTelefono.elenco.length
+        ? 'Senza internet non trovo ' + query + '. Posso mettere le canzoni del telefono: dimmi metti le canzoni del telefono.'
+        : 'Senza internet non posso cercare le canzoni.');
+    }
     if (errore === 'rete') return Voce.parla('Non riesco a collegarmi a YouTube.');
     return Voce.parla('Non trovo ' + query + '.');
   }
@@ -5137,6 +5304,7 @@ const Sessione = {
     }
     this.attiva = true;
     this._inizio = Date.now();
+    try { VoceOffline.preparaInSilenzio(); } catch (e) {}   // 20/11/2026
     Memoria.carica();
     Gusti.carica();
     Preferiti.carica();
@@ -6613,6 +6781,7 @@ migraSettingsV3();
 migraComandiCambia();
 Memoria.carica();
 CanzoniTelefono.carica();   // 20/11/2026: elenco delle canzoni del telefono (MP3)
+VoceOffline.controlla();    // 20/11/2026: la voce senza internet c'è già?
 applicaStili();
 applicaLayoutPulsanti();
 initLayoutPulsanti();

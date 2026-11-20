@@ -1742,6 +1742,10 @@ const Classificatore = {
     if (!conVerbo && RE_CHIACCHIERA.test(norm)) {
       return this._decisione('CHAT', { motivo: 'chiacchierata (amichetto)', testo });
     }
+    // 20/11/2026: tutte le canzoni del telefono ("metti le canzoni del telefono", "le mie mp3").
+    if (RE_TELEFONO.test(norm)) {
+      return this._decisione('RICERCA', { intent: 'telefono', query: testo, motivo: motivo + ' (canzoni del telefono)', testo });
+    }
     // 10/11/2026: preferiti ("questa mi piace", "togli dai preferiti", "metti i miei preferiti").
     const pref = rilevaPreferiti(norm);
     if (pref === 'aggiungi') return this._decisione('COMANDO', { azione: 'PREF_AGGIUNGI', motivo: 'preferiti: aggiungi', testo });
@@ -2416,6 +2420,389 @@ const Radio = {
   }
 };
 
+// ------------------------------------------------------------
+// 10f. CANZONI DEL TELEFONO (MP3) (20/11/2026)
+// ------------------------------------------------------------
+// Il nonno sceglie dal menu le canzoni (MP3 dei suoi CD o comprate): ASIA le COPIA
+// nella memoria del browser (IndexedDB), così restano anche dopo aver chiuso l'app.
+// Quando Domenico chiede una canzone o un cantante, ASIA guarda PRIMA qui: se la trova
+// la suona subito, senza YouTube (niente pubblicità, niente internet, niente quota).
+const CanzoniTelefono = {
+  DB: 'asia_mp3',
+  STORE: 'canzoni',
+  MAX_CODA_ARTISTA: 30,
+  elenco: [],           // [{ id, titolo, autore, nomeFile, dimensione, durataSec, aggiunto }]
+  _blob: new Map(),     // id → Blob (il file vero, letto dal disco solo quando suona)
+  _url: new Map(),      // id → indirizzo "blob:" creato al primo uso
+  _pronto: null,
+
+  /** true se il brano è una canzone del telefono (anche se salvata nei preferiti/storico). */
+  eMp3(b) { return !!(b && typeof b.id === 'string' && b.id.indexOf('mp3:') === 0); },
+  /** true se quella canzone c'è ancora nel telefono. */
+  ha(id) { return this.elenco.some(v => v.id === id); },
+
+  _apri() {
+    if (typeof indexedDB === 'undefined') return Promise.reject(new Error('memoria del browser non disponibile'));
+    return new Promise((ok, ko) => {
+      const r = indexedDB.open(this.DB, 1);
+      r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains(this.STORE)) r.result.createObjectStore(this.STORE, { keyPath: 'id' }); };
+      r.onsuccess = () => ok(r.result);
+      r.onerror = () => ko(r.error || new Error('apertura fallita'));
+    });
+  },
+
+  /** Legge l'elenco all'avvio (una volta sola). @returns {Promise<object[]>} */
+  carica() {
+    if (this._pronto) return this._pronto;
+    this._pronto = (async () => {
+      try {
+        const db = await this._apri();
+        const tutti = await new Promise((ok, ko) => {
+          const rq = db.transaction(this.STORE, 'readonly').objectStore(this.STORE).getAll();
+          rq.onsuccess = () => ok(rq.result || []);
+          rq.onerror = () => ko(rq.error);
+        });
+        db.close();
+        this.elenco = [];
+        this._blob.clear();
+        tutti.forEach(v => {
+          this._blob.set(v.id, v.blob);
+          const m = Object.assign({}, v); delete m.blob;
+          this.elenco.push(m);
+        });
+        if (this.elenco.length) log('🎵 Canzoni del telefono: ' + this.elenco.length);
+      } catch (e) {
+        log('⚠️ Canzoni del telefono non disponibili: ' + (e && e.message));
+      }
+      return this.elenco;
+    })();
+    return this._pronto;
+  },
+
+  /** Copia nella memoria di ASIA i file scelti dal nonno.
+   *  @param {FileList|File[]} files  @param {function(n, totale)} avanzamento
+   *  @returns {Promise<{aggiunte:number, doppie:number, scartate:number, errori:number, spazioFinito:boolean}>} */
+  async aggiungi(files, avanzamento) {
+    await this.carica();
+    const tuttiFile = [...(files || [])];
+    const lista = tuttiFile.filter(f => /^audio\//.test(f.type || '') || /\.(mp3|m4a|aac|ogg|oga|opus|wav|flac)$/i.test(f.name || ''));
+    const esito = { aggiunte: 0, doppie: 0, scartate: tuttiFile.length - lista.length, errori: 0, spazioFinito: false };
+    if (!lista.length) return esito;
+    // chiede a Chrome di non cancellare mai questi file per fare spazio
+    try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) {}
+    let db;
+    try { db = await this._apri(); } catch (e) { esito.errori = lista.length; log('❌ MP3: ' + e.message); return esito; }
+    try {
+      for (let i = 0; i < lista.length; i++) {
+        const f = lista[i];
+        if (avanzamento) { try { avanzamento(i + 1, lista.length); } catch (e) {} }
+        if (this.elenco.some(v => v.nomeFile === f.name && v.dimensione === f.size)) { esito.doppie++; continue; }
+        try {
+          const tag = await leggiTagAudio(f);
+          const daNome = titoloDaNomeFile(f.name);
+          const meta = {
+            id: 'mp3:' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+            titolo: tag.titolo || daNome.titolo, autore: tag.autore || daNome.autore,
+            nomeFile: f.name, dimensione: f.size, durataSec: 0, aggiunto: Date.now()
+          };
+          await new Promise((ok, ko) => {
+            const tx = db.transaction(this.STORE, 'readwrite');
+            tx.objectStore(this.STORE).put(Object.assign({ blob: f }, meta));
+            tx.oncomplete = ok;
+            tx.onerror = () => ko(tx.error);
+            tx.onabort = () => ko(tx.error || new Error('scrittura annullata'));
+          });
+          this.elenco.push(meta);
+          this._blob.set(meta.id, f);
+          esito.aggiunte++;
+          log('🎵 Aggiunta: ' + (meta.autore ? meta.autore + ' – ' : '') + meta.titolo);
+        } catch (e) {
+          if (e && /quota/i.test((e.name || '') + ' ' + (e.message || ''))) { esito.spazioFinito = true; log('❌ MP3: spazio finito'); break; }
+          esito.errori++;
+          log('❌ MP3 non copiato (' + f.name + '): ' + (e && e.message));
+        }
+      }
+    } finally { try { db.close(); } catch (e) {} }
+    return esito;
+  },
+
+  /** Cancella una canzone dalla memoria di ASIA (il file originale nel telefono resta). */
+  async togli(id) {
+    const db = await this._apri();
+    await new Promise((ok, ko) => {
+      const tx = db.transaction(this.STORE, 'readwrite');
+      tx.objectStore(this.STORE).delete(id);
+      tx.oncomplete = ok; tx.onerror = () => ko(tx.error);
+    });
+    db.close();
+    this.elenco = this.elenco.filter(v => v.id !== id);
+    this._blob.delete(id);
+    if (this._url.has(id)) { try { URL.revokeObjectURL(this._url.get(id)); } catch (e) {} this._url.delete(id); }
+  },
+
+  /** Cancella tutte le canzoni dalla memoria di ASIA. */
+  async svuota() {
+    const db = await this._apri();
+    await new Promise((ok, ko) => {
+      const tx = db.transaction(this.STORE, 'readwrite');
+      tx.objectStore(this.STORE).clear();
+      tx.oncomplete = ok; tx.onerror = () => ko(tx.error);
+    });
+    db.close();
+    this._url.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
+    this.elenco = []; this._blob.clear(); this._url.clear();
+    log('🗑️ Canzoni del telefono cancellate');
+  },
+
+  /** Indirizzo da dare al lettore audio (null se la canzone non c'è più). */
+  url(id) {
+    if (this._url.has(id)) return this._url.get(id);
+    const b = this._blob.get(id);
+    if (!b || typeof URL === 'undefined' || !URL.createObjectURL) return null;
+    const u = URL.createObjectURL(b);
+    this._url.set(id, u);
+    return u;
+  },
+
+  /** La canzone come "brano" per Coda e Player. */
+  comeBrano(v) {
+    return { id: v.id, locale: true, titolo: v.titolo, autore: v.autore || '', anno: null, durataSec: v.durataSec || 0 };
+  },
+
+  /** Il Player ha letto la durata vera: la ricorda (per "che canzone è"). */
+  ricordaDurata(id, sec) {
+    const v = this.elenco.find(x => x.id === id);
+    if (v && sec > 0 && !v.durataSec) v.durataSec = Math.round(sec);
+  },
+
+  _parole(t) { return normalizza(t).split(' ').filter(w => w && !Storico.VUOTE.has(w)); },
+  _uguale(a, b) { return a === b || (a.length > 3 && b.length > 3 && somiglianza(a, b) >= 0.75); },
+  _mescola(arr) {
+    for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; }
+    return arr;
+  },
+
+  /** Cerca tra le canzoni del telefono.
+   *  - una canzone precisa: tutte le parole chieste sono nel titolo/cantante e il titolo è
+   *    coperto almeno al 60% ("albachiara", "albachiara di vasco") → quella, poi le altre
+   *    dello stesso cantante;
+   *  - un cantante: tutte le parole chieste sono nel nome del cantante → le sue, mescolate.
+   *  Prudente apposta: "sei" NON prende "Sei bellissima" (se no YouTube non partirebbe mai).
+   *  @param {{escludi?:Set<string>}} opz  @returns {?{tipo:'brano'|'artista', brani:object[]}} */
+  cerca(query, opz) {
+    const o = opz || {};
+    const escludi = o.escludi || new Set();
+    const q = this._parole(query);
+    if (!q.length || !this.elenco.length) return null;
+    let migliore = null, punti = 0;
+    const delCantante = [];
+    for (const v of this.elenco) {
+      if (escludi.has(v.id)) continue;
+      const titolo = this._parole(v.titolo);
+      const autore = this._parole(v.autore);
+      const tutte = titolo.concat(autore);
+      if (!q.every(w => tutte.some(t => this._uguale(w, t)))) continue;
+      if (titolo.length) {
+        const copertura = titolo.filter(t => q.some(w => this._uguale(w, t))).length / titolo.length;
+        if (copertura >= 0.6) {
+          const conCantante = autore.some(t => q.some(w => this._uguale(w, t))) ? 1 : 0;
+          const p = copertura * 10 + conCantante;
+          if (p > punti) { punti = p; migliore = v; }
+          continue;
+        }
+      }
+      if (autore.length && q.every(w => autore.some(t => this._uguale(w, t)))) delCantante.push(v);
+    }
+    if (migliore) {
+      const stessoCantante = migliore.autore
+        ? this._mescola(this.elenco.filter(v => v !== migliore && !escludi.has(v.id) &&
+            normalizza(v.autore) === normalizza(migliore.autore))).slice(0, this.MAX_CODA_ARTISTA - 1)
+        : [];
+      return { tipo: 'brano', brani: [migliore].concat(stessoCantante).map(v => this.comeBrano(v)) };
+    }
+    if (delCantante.length) {
+      return { tipo: 'artista', brani: this._mescola(delCantante).slice(0, this.MAX_CODA_ARTISTA).map(v => this.comeBrano(v)) };
+    }
+    return null;
+  },
+
+  /** Tutte le canzoni del telefono, mescolate. */
+  tutte() { return this._mescola(this.elenco.slice()).map(v => this.comeBrano(v)); },
+
+  /** Il riquadro del menu: aggiungi, elenco con cestino, cancella tutte. */
+  pannello() {
+    const box = document.createElement('div');
+    box.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+    const info = document.createElement('div');
+    info.style.cssText = 'font-size:15px;color:#f0f0f0;';
+    const stileBtn = 'padding:10px 16px;background:#333;color:#fff;border:1px solid #555;border-radius:8px;cursor:pointer;font-size:15px;';
+    const riga = document.createElement('div');
+    riga.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
+    const aggiungi = document.createElement('button');
+    aggiungi.textContent = '➕ Aggiungi canzoni dal telefono';
+    aggiungi.style.cssText = stileBtn + 'background:#1f5130;border-color:#3c8a55;';
+    const cancellaTutte = document.createElement('button');
+    cancellaTutte.textContent = '🗑️ Cancella tutte';
+    cancellaTutte.style.cssText = stileBtn;
+    riga.appendChild(aggiungi); riga.appendChild(cancellaTutte);
+    const stato = document.createElement('div');
+    stato.style.cssText = 'font-size:15px;color:#ffd970;min-height:1.2em;';
+    const lista = document.createElement('div');
+    lista.style.cssText = 'max-height:260px;overflow-y:auto;border:1px solid #444;border-radius:8px;background:#141414;';
+    box.appendChild(info); box.appendChild(riga); box.appendChild(stato); box.appendChild(lista);
+
+    const scriviElenco = () => {
+      const n = this.elenco.length;
+      info.textContent = n ? '🎵 ' + n + (n === 1 ? ' canzone' : ' canzoni') + ' nella memoria di ASIA.' : '🎵 Nessuna canzone ancora.';
+      cancellaTutte.style.display = n ? '' : 'none';
+      lista.style.display = n ? '' : 'none';
+      lista.innerHTML = '';
+      this.elenco.slice().sort((a, b) => (a.autore + ' ' + a.titolo).localeCompare(b.autore + ' ' + b.titolo, 'it'))
+        .forEach(v => {
+          const r = document.createElement('div');
+          r.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid #2a2a2a;';
+          const t = document.createElement('span');
+          t.style.cssText = 'flex:1;font-size:15px;color:#f0f0f0;';
+          t.textContent = (v.autore ? v.autore + ' – ' : '') + v.titolo;
+          const x = document.createElement('button');
+          x.textContent = '🗑️';
+          x.title = 'Togli questa canzone';
+          x.style.cssText = 'padding:4px 10px;background:#3a1f1f;color:#fff;border:1px solid #6a3a3a;border-radius:6px;cursor:pointer;';
+          x.onclick = async () => {
+            if (!confirm('Togliere da ASIA "' + t.textContent + '"?\n(Il file nel telefono non viene cancellato.)')) return;
+            try { await this.togli(v.id); } catch (e) { stato.textContent = '❌ Non riesco a toglierla: ' + (e && e.message); }
+            scriviElenco();
+          };
+          r.appendChild(t); r.appendChild(x);
+          lista.appendChild(r);
+        });
+      if (navigator.storage && navigator.storage.estimate) {
+        navigator.storage.estimate().then(s => {
+          if (!s || !s.quota) return;
+          const mb = x => Math.round(x / 1048576);
+          info.textContent += '  (spazio usato ' + mb(s.usage || 0) + ' MB, libero circa ' + mb(s.quota - (s.usage || 0)) + ' MB)';
+        }).catch(() => {});
+      }
+    };
+
+    const scegli = document.createElement('input');
+    scegli.type = 'file';
+    scegli.multiple = true;
+    scegli.accept = 'audio/*,.mp3,.m4a,.ogg,.wav,.flac';
+    scegli.style.display = 'none';
+    box.appendChild(scegli);
+    aggiungi.onclick = () => { scegli.value = ''; scegli.click(); };
+    scegli.onchange = async () => {
+      if (!scegli.files || !scegli.files.length) return;
+      aggiungi.disabled = true;
+      const e = await this.aggiungi(scegli.files, (i, tot) => { stato.textContent = '⏳ Copio ' + i + ' di ' + tot + '... non chiudere ASIA'; });
+      aggiungi.disabled = false;
+      const parti = ['✔️ Aggiunte ' + e.aggiunte];
+      if (e.doppie) parti.push(e.doppie + ' c\'erano già');
+      if (e.scartate) parti.push(e.scartate + ' non sono canzoni');
+      if (e.errori) parti.push(e.errori + ' non riuscite');
+      if (e.spazioFinito) parti.push('SPAZIO FINITO nel telefono');
+      stato.textContent = parti.join(' · ');
+      scriviElenco();
+    };
+    cancellaTutte.onclick = async () => {
+      if (!confirm('Cancellare da ASIA TUTTE le canzoni del telefono?\n(I file nel telefono restano.)')) return;
+      try { await this.svuota(); stato.textContent = '✔️ Cancellate'; } catch (e) { stato.textContent = '❌ ' + (e && e.message); }
+      scriviElenco();
+    };
+    scriviElenco();
+    this.carica().then(scriviElenco);
+    return box;
+  }
+};
+
+/** "03 - Vasco Rossi - Albachiara.mp3" → { autore: 'Vasco Rossi', titolo: 'Albachiara' }. */
+function titoloDaNomeFile(nome) {
+  let n = String(nome || '').replace(/\.[a-z0-9]{2,4}$/i, '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+  n = n.replace(/^\(?\d{1,3}\)?\s*[-.)]?\s+(?=\S)/, '');          // numero di traccia davanti
+  const parti = n.split(/\s+[-–]\s+/);
+  if (parti.length >= 2) return { autore: parti[0].trim(), titolo: parti.slice(1).join(' - ').trim() };
+  return { autore: '', titolo: n };
+}
+
+/** Legge titolo e cantante dai "tag" dentro un MP3 (ID3v2.2/2.3/2.4, poi ID3v1).
+ *  @param {Uint8Array} testa  primi byte del file  @param {?Uint8Array} coda  ultimi 128 byte
+ *  @returns {{titolo:string, autore:string}} */
+function leggiID3(testa, coda) {
+  const out = { titolo: '', autore: '' };
+  const dec = (enc, bytes) => {
+    try {
+      let s;
+      if (enc === 1) {
+        const le = !(bytes[0] === 0xFE && bytes[1] === 0xFF);
+        const inizio = ((bytes[0] === 0xFF && bytes[1] === 0xFE) || (bytes[0] === 0xFE && bytes[1] === 0xFF)) ? 2 : 0;
+        s = new TextDecoder(le ? 'utf-16le' : 'utf-16be').decode(bytes.subarray(inizio));
+      } else if (enc === 2) s = new TextDecoder('utf-16be').decode(bytes);
+      else if (enc === 3) s = new TextDecoder('utf-8').decode(bytes);
+      else s = String.fromCharCode.apply(null, Array.from(bytes));
+      return s.replace(/\u0000[\s\S]*$/, '').trim();
+    } catch (e) { return ''; }
+  };
+  const b = testa;
+  if (b && b.length > 10 && b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) {   // "ID3"
+    const ver = b[3];
+    const dim = ((b[6] & 0x7f) << 21) | ((b[7] & 0x7f) << 14) | ((b[8] & 0x7f) << 7) | (b[9] & 0x7f);
+    let p = 10;
+    if (b[5] & 0x40 && ver >= 3) {   // intestazione estesa
+      const ext = ver === 4 ? (((b[10] & 0x7f) << 21) | ((b[11] & 0x7f) << 14) | ((b[12] & 0x7f) << 7) | (b[13] & 0x7f))
+                            : (((b[10] << 24) | (b[11] << 16) | (b[12] << 8) | b[13]) + 4);
+      p += ext;
+    }
+    const fine = Math.min(b.length, 10 + dim);
+    const lungId = ver === 2 ? 3 : 4, lungTesta = ver === 2 ? 6 : 10;
+    const nomi = ver === 2 ? { TT2: 'titolo', TP1: 'autore', TP2: 'autore2' } : { TIT2: 'titolo', TPE1: 'autore', TPE2: 'autore2' };
+    let autore2 = '';
+    while (p + lungTesta <= fine) {
+      const id = String.fromCharCode.apply(null, Array.from(b.subarray(p, p + lungId)));
+      if (!/^[A-Z0-9]+$/.test(id)) break;          // padding: fine dei frame
+      let size;
+      if (ver === 2) size = (b[p + 3] << 16) | (b[p + 4] << 8) | b[p + 5];
+      else if (ver === 4) size = ((b[p + 4] & 0x7f) << 21) | ((b[p + 5] & 0x7f) << 14) | ((b[p + 6] & 0x7f) << 7) | (b[p + 7] & 0x7f);
+      else size = ((b[p + 4] << 24) | (b[p + 5] << 16) | (b[p + 6] << 8) | b[p + 7]) >>> 0;
+      const inizio = p + lungTesta;
+      if (size <= 0 || inizio + size > fine) break;
+      const campo = nomi[id];
+      if (campo) {
+        const testo = dec(b[inizio], b.subarray(inizio + 1, inizio + size));
+        if (campo === 'autore2') autore2 = testo;
+        else if (!out[campo]) out[campo] = testo;
+      }
+      if (out.titolo && out.autore) break;
+      p = inizio + size;
+    }
+    if (!out.autore && autore2) out.autore = autore2;
+  }
+  if ((!out.titolo || !out.autore) && coda && coda.length >= 128 && coda[0] === 0x54 && coda[1] === 0x41 && coda[2] === 0x47) {   // "TAG"
+    const t = dec(0, coda.subarray(3, 33)), a = dec(0, coda.subarray(33, 63));
+    if (!out.titolo) out.titolo = t;
+    if (!out.autore) out.autore = a;
+  }
+  out.autore = out.autore.split('/')[0].trim();     // "Artista1/Artista2" → il primo
+  return out;
+}
+
+/** Legge i tag di un file audio (solo MP3: per gli altri vale il nome del file). */
+async function leggiTagAudio(file) {
+  try {
+    if (!file || !file.slice) return { titolo: '', autore: '' };
+    let testa = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+    if (testa.length === 10 && testa[0] === 0x49 && testa[1] === 0x44 && testa[2] === 0x33) {
+      const dim = ((testa[6] & 0x7f) << 21) | ((testa[7] & 0x7f) << 14) | ((testa[8] & 0x7f) << 7) | (testa[9] & 0x7f);
+      testa = new Uint8Array(await file.slice(0, Math.min(10 + dim, 8 * 1048576)).arrayBuffer());
+    }
+    const coda = file.size > 128 ? new Uint8Array(await file.slice(file.size - 128).arrayBuffer()) : null;
+    return leggiID3(testa, coda);
+  } catch (e) { return { titolo: '', autore: '' }; }
+}
+
+/** "metti le canzoni del telefono", "le mie mp3", "la musica scaricata" → true. */
+const RE_TELEFONO = /\b(?:(?:canzon\w*|musica|brani|pezzi) (?:del|dal|sul|nel|che ho (?:nel|sul)) (?:mio )?(?:telefono|telefonino|cellulare)|(?:le )?(?:mie )?mp3|(?:canzon\w*|musica|brani) scaricat\w*)\b/;
+
 /** "metti Radio Italia", "accendi la radio", "la radio", "metti RTL", "RDS"… → nome (anche '') o null. */
 const RE_RADIO = /^(?:metti(?:mi)?|accendi|ascolta|ascoltiamo|fammi sentire|voglio sentire|vorrei sentire|voglio|vorrei|sentiamo)?\s*(?:la |una )?(radio)\b\s*(.*)$/;
 const RE_RADIO_NOMI = /^(?:metti(?:mi)?|accendi|ascolta|sentiamo)?\s*(rtl(?: 102 5)?|rds|deejay|m2o|r101|rmc|virgin radio|kiss kiss|monte carlo|rai radio (?:uno|due|tre|1|2|3))$/;
@@ -2854,6 +3241,14 @@ const Player = {
     a.addEventListener('pause', ok(() => { if (!a.ended) this._suStatoYT({ data: YT_PAUSA }); }));
     a.addEventListener('ended', ok(() => this._suStatoYT({ data: YT_FINITO })));
     a.addEventListener('error', ok(() => this._suErroreYT({ data: 5 })));
+    // 20/11/2026: la durata vera delle canzoni del telefono (i file non la dicono prima)
+    a.addEventListener('loadedmetadata', ok(() => {
+      const b = this._corrente;
+      if (b && b.locale && isFinite(a.duration) && a.duration > 0) {
+        if (!b.durataSec) b.durataSec = Math.round(a.duration);
+        CanzoniTelefono.ricordaDurata(b.id, a.duration);
+      }
+    }));
     this._audio = a;
     return a;
   },
@@ -2861,6 +3256,24 @@ const Player = {
   /** Carica e fa partire un brano. */
   riproduci(brano) {
     if (!brano) return;
+    // 20/11/2026: canzone del telefono (anche se arriva da preferiti/storico/soprannomi,
+    // dove l'indirizzo vecchio non vale più): si prende sempre il file dalla memoria di ASIA.
+    if (CanzoniTelefono.eMp3(brano)) {
+      brano.locale = true;
+      brano.url = CanzoniTelefono.url(brano.id);
+      if (!brano.url) {
+        this._idRiproduzione++;
+        const id = this._idRiproduzione;
+        this._corrente = brano;
+        log('❌ Canzone del telefono non trovata (cancellata dal menu?): ' + pulisciTitolo(brano.titolo));
+        setTimeout(() => {
+          if (id !== this._idRiproduzione) return;
+          this._imposta('fermo');
+          Coda.suErrore(brano, 5);
+        }, 0);
+        return;
+      }
+    }
     this._idRiproduzione++;
     this._corrente = brano;
     this._inizioAscolto = Date.now();
@@ -4324,6 +4737,25 @@ const Esecutore = {
         return;
       }
 
+      if (d.intent === 'telefono') {
+        await CanzoniTelefono.carica();
+        if (mioId !== this._idRichiesta) return;
+        const brani = CanzoniTelefono.tutte();
+        if (!brani.length) {
+          Attesa.ferma();
+          Suoni.errore();
+          await Voce.parla('Nel telefono non ci sono ancora canzoni. Si aggiungono dal menu di Asia.');
+          return;
+        }
+        Coda.imposta(brani, 'playlist');
+        await Attesa.finisci();
+        if (mioId !== this._idRichiesta) return;
+        await Voce.parla('Le canzoni del telefono, ' + brani.length + (brani.length === 1 ? ' canzone. ' : ' canzoni. ') + Annunci.apertura(brani[0]));
+        if (mioId !== this._idRichiesta) return;
+        Coda.prossima();
+        return;
+      }
+
       if (d.intent === 'piacere' || d.intent === 'novita' || d.intent === 'momento') {
         await this._eseguiSpeciale(d);
         return;
@@ -4344,9 +4776,30 @@ const Esecutore = {
 
       const origineAltra = d.origine === 'altra';
       let query = d.query;
+      // 20/11/2026: PRIMA le canzoni del telefono (MP3): niente YouTube, niente pubblicità.
+      await CanzoniTelefono.carica();
+      if (mioId !== this._idRichiesta) return;
+      const escludiTel = new Set();
+      if (origineAltra) Memoria.braniSessione.forEach(id => escludiTel.add(id));
+      const dalTelefono = CanzoniTelefono.cerca(query, { escludi: escludiTel });
+      if (dalTelefono) {
+        const brani = dalTelefono.brani;
+        log('🎵 Dal telefono (' + dalTelefono.tipo + '): ' + brani.map(b => pulisciTitolo(b.titolo)).join(' | '));
+        const artistaTel = dalTelefono.tipo === 'brano' ? (brani[0].autore || null) : query;
+        Memoria.registraRicerca(query, artistaTel);
+        Coda.imposta(brani, dalTelefono.tipo === 'brano' ? 'brano' : (origineAltra ? 'altra' : 'artista'));
+        await Attesa.finisci();
+        if (mioId !== this._idRichiesta) return;
+        await Voce.parla(Annunci.apertura(brani[0]));
+        if (mioId !== this._idRichiesta) return;
+        Coda.prossima();
+        return;
+      }
       // 10/11/2026: canzone già suonata? Allora niente YouTube (anche se Chrome ha capito
       // qualche lettera diversa dalla volta prima).
-      const giaSentita = !origineAltra && Storico.trova(query);
+      let giaSentita = !origineAltra && Storico.trova(query);
+      // 20/11/2026: una canzone del telefono tolta dal menu non si può più rimettere da qui
+      if (giaSentita && CanzoniTelefono.eMp3(giaSentita) && !CanzoniTelefono.ha(giaSentita.id)) giaSentita = null;
       if (giaSentita) {
         log('🗂️ Già suonata, la rimetto senza cercare: ' + pulisciTitolo(giaSentita.titolo));
         const b = Preferiti._copia(giaSentita);
@@ -4443,7 +4896,11 @@ const Esecutore = {
   /** 10/11/2026: i preferiti, in fila e mescolati (o letti come lista se richiesto). */
   async _eseguiPreferiti(d) {
     const mioId = this._idRichiesta;
-    const brani = Preferiti.elenco().map(v => Preferiti._copia(v));
+    await CanzoniTelefono.carica();
+    if (mioId !== this._idRichiesta) return;
+    // 20/11/2026: senza le canzoni del telefono tolte dal menu
+    const brani = Preferiti.elenco().filter(v => !CanzoniTelefono.eMp3(v) || CanzoniTelefono.ha(v.id))
+      .map(v => Preferiti._copia(v));
     if (!brani.length) {
       Suoni.errore();
       await Voce.parla('Non hai ancora canzoni preferite. Quando una ti piace, premi AVVIA e dimmi: questa mi piace.');
@@ -5559,6 +6016,7 @@ const GUIDA_HTML = `<div class="guida">
 <tr><td>Le novità</td><td>"le canzoni nuove", "le novità", "le novità di Laura Pausini"</td></tr>
 <tr><td>I preferiti</td><td>"metti i miei preferiti", "le mie canzoni" (in fila, mescolati) · "quali sono i miei preferiti" (lista)</td></tr>
 <tr><td>Salvare / togliere</td><td>"questa mi piace", "mi piace", "aggiungila ai preferiti" · "togli dai preferiti", "questa non mi piace più"</td></tr>
+<tr><td>Le canzoni del telefono</td><td>"metti le canzoni del telefono", "le mie mp3" (tutte, mescolate) · le canzoni e i cantanti messi in ⚙️ → Generale → 🎵 partono da soli dal telefono, <b>senza pubblicità</b></td></tr>
 <tr><td>La radio</td><td>"metti la radio" (la preferita), "metti Radio Italia", "metti RTL 102.5", "RDS", "metti radio Deejay"</td></tr>
 <tr><td>Un soprannome</td><td>"la canzone del treno" (se l'hai scritto in ⚙️) · durante la canzone: "chiamala la canzone del cane"</td></tr>
 <tr><td>Comandi della musica</td><td><b>stop</b>/basta/fermati · <b>pausa</b> · <b>riprendi</b> · <b>salta</b>/prossima · <b>indietro</b> · <b>più forte</b> / <b>più piano</b> · <b>di nuovo</b> (rimette quella) · <b>un'altra</b> (dello stesso cantante) · <b>che canzone è</b>/chi canta</td></tr>
@@ -5669,6 +6127,11 @@ const SCHEMA = [
             'Oppure, mentre suona la canzone: premi AVVIA e di\' "chiamala ..." con il nome che vuoi.' },
     { key: 'radioPreferita', label: '📻 Radio preferita (parte quando dice "metti la radio")', tipo: 'text' },
     { key: 'radioElenco', label: '📻 Radio scritte a mano (facoltativo: nome = indirizzo dello stream). Le altre ASIA le trova da sola.', tipo: 'textarea' },
+    { key: '_canzoniTelefono', label: '🎵 Canzoni del telefono (MP3): suonano senza YouTube, quindi senza pubblicità e anche senza internet', tipo: 'mp3',
+      hint: 'Premi "Aggiungi", scegli le canzoni (puoi selezionarne tante insieme) e aspetta che finisca la copia. ' +
+            'Quando Domenico chiede una canzone o un cantante, ASIA guarda PRIMA qui; se non la trova, va su YouTube come sempre. ' +
+            'Il nome giusto lo legge dentro l\'MP3; se manca, dal nome del file (meglio se è "Cantante - Titolo.mp3"). ' +
+            'Frase per sentirle tutte: "metti le canzoni del telefono".' },
     { key: 'descrizioneAmico', label: 'Chi è {nome} (lo usa Asia quando chiacchiera con lui: cambialo come vuoi)', tipo: 'textarea' },
     { key: 'etichettaPulsanteAvvia', label: 'Scritta sul pulsante AVVIA', tipo: 'text' },
     { key: 'mostraLog', label: 'Mostra log tecnico', tipo: 'checkbox' },
@@ -5896,6 +6359,10 @@ function creaCampo(campo) {
                     'Sul PC ASIA è solo "in casa" (localhost) e il telefono non la vede. Quando la mettiamo online, scrivi qui sopra il suo indirizzo.</div>';
     }
     wrap.appendChild(d);
+
+  } else if (campo.tipo === 'mp3') {
+    // 20/11/2026: canzoni del telefono
+    wrap.appendChild(CanzoniTelefono.pannello());
 
   } else if (campo.tipo === 'guida') {
     const d = document.createElement('div');
@@ -6145,6 +6612,7 @@ migraSettingsV2();
 migraSettingsV3();
 migraComandiCambia();
 Memoria.carica();
+CanzoniTelefono.carica();   // 20/11/2026: elenco delle canzoni del telefono (MP3)
 applicaStili();
 applicaLayoutPulsanti();
 initLayoutPulsanti();

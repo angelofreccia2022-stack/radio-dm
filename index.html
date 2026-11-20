@@ -1206,7 +1206,10 @@ const Listener = {
 
   /** Crea SEMPRE una nuova istanza (dopo abort() non si riusa mai la vecchia). */
   _apri() {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    // 20/11/2026: senza internet, sui telefoni senza la voce di Chrome si usa la voce di ASIA (Vosk)
+    const locale = VoceOffline.daUsare();
+    const usaVosk = locale && VoceOffline.motore() === 'vosk';
+    const SR = usaVosk ? VoskSR : (window.SpeechRecognition || window.webkitSpeechRecognition);
     if (!SR) {
       log('❌ Riconoscimento vocale non supportato. Usa Chrome.');
       Sessione.termina('errore_microfono');
@@ -1218,10 +1221,12 @@ const Listener = {
     r.interimResults = true;
     r.maxAlternatives = 5;       // 5 e non 8: meno falsi positivi (R5)
     // 20/11/2026: senza internet si usa la voce "sul telefono" (se Chrome ce l'ha)
-    this._locale = VoceOffline.daUsare();
-    if (this._locale) {
+    this._locale = locale;
+    this._vosk = usaVosk;
+    if (usaVosk) log('🎤 Microfono SENZA internet (voce di ASIA)');
+    else if (locale) {
       try { r.processLocally = true; } catch (e) {}
-      log('🎤 Microfono SENZA internet');
+      log('🎤 Microfono SENZA internet (voce di Chrome)');
     }
     this.r = r;
     this.generazione++;
@@ -1364,7 +1369,8 @@ const Listener = {
       // 20/11/2026: Chrome diceva di avere la voce senza internet, ma non la usa
       log('🎤 La voce senza internet non funziona su questo telefono: torno a quella normale');
       VoceOffline._forza = false;
-      VoceOffline.stato = 'non_disponibile';
+      if (this._vosk) VoceVosk.stato = 'errore';           // la voce di ASIA non è partita
+      else if (VoceOffline.stato === 'disponibile') VoceOffline.stato = 'non_disponibile';
       this._chiudi();
       this._bloccaPer(1000);
       return;
@@ -2683,23 +2689,24 @@ const CanzoniTelefono = {
     const voceStato = document.createElement('div');
     voceStato.style.cssText = 'font-size:15px;color:#ffd970;';
     const voceBtn = document.createElement('button');
-    voceBtn.textContent = '⬇️ Prepara la voce senza internet';
-    voceBtn.style.cssText = stileBtn + 'align-self:flex-start;';
+    voceBtn.textContent = '🎤 Prova e prepara la voce senza internet';
+    voceBtn.style.cssText = stileBtn + 'align-self:flex-start;background:#1f3f66;border-color:#3c6aa8;';
     const voceDett = document.createElement('div');
     voceDett.style.cssText = 'font-size:13px;color:#bbbbbb;';
+    const voceProva = document.createElement('div');
+    voceProva.style.cssText = 'font-size:16px;color:#ffffff;min-height:1.2em;';
     const scriviVoce = () => {
-      voceStato.textContent = VoceOffline.descrizione();
-      voceDett.textContent = VoceOffline.dettaglio ? 'Dettagli per Claude: ' + VoceOffline.dettaglio : '';
-      voceBtn.style.display = (VoceOffline.stato === 'scaricabile' || VoceOffline.stato === 'non_disponibile') ? '' : 'none';
+      voceStato.textContent = VoceOffline.descrizioneCompleta();
+      voceDett.textContent = 'Dettagli per Claude: ' + (VoceOffline.dettaglio || '?') +
+        ' · voce di ASIA: ' + (VoceVosk.installata() ? 'installata' : 'no') + (VoceVosk.errore ? ' (' + VoceVosk.errore + ')' : '');
       voceBtn.disabled = false;
     };
     voceBtn.onclick = async () => {
       voceBtn.disabled = true;
-      voceStato.textContent = VoceOffline.descrizione.call({ stato: 'in_scaricamento' });
-      await VoceOffline.installa();
+      await VoceOffline.provaEPrepara(t => { voceProva.textContent = t; });
       scriviVoce();
     };
-    box.appendChild(voceTit); box.appendChild(voceStato); box.appendChild(voceDett); box.appendChild(voceBtn);
+    box.appendChild(voceTit); box.appendChild(voceStato); box.appendChild(voceBtn); box.appendChild(voceProva); box.appendChild(voceDett);
     scriviVoce();
     VoceOffline.controlla().then(scriviVoce);
 
@@ -2916,22 +2923,126 @@ const VoceOffline = {
     return this._installando;
   },
 
-  /** Premuto AVVIA: se il pacchetto manca e non si consumano dati della SIM, lo scarica. */
+  /** Premuto AVVIA: prepara da solo la voce senza internet (senza consumare dati della SIM).
+   *  Telefono nuovo → quella di Chrome; telefono vecchio → la voce di ASIA (Vosk). */
   preparaInSilenzio() {
+    try { VoceVosk.sblocca(); } catch (e) {}
     this.controlla().then(s => {
-      if (s === 'scaricabile' && !senzaInternet() && !risparmiaDati()) this.installa();
+      const posso = !senzaInternet() && !risparmiaDati();
+      if (s === 'scaricabile' && posso) { this.installa(); return; }
+      if (s === 'disponibile') return;
+      if (VoceVosk.installata()) { if (senzaInternet()) VoceVosk.prepara(); return; }   // pronta subito se serve
+      if (posso && CanzoniTelefono.elenco.length) VoceVosk.prepara();
     });
   },
 
+  /** Quale voce senza internet c'è: 'chrome' (telefoni nuovi), 'vosk' (la voce di ASIA), o null. */
+  motore() {
+    if (this.stato === 'disponibile') return 'chrome';
+    if (VoceVosk.installata() && VoceVosk.stato !== 'errore') return 'vosk';
+    return null;
+  },
+
   /** true se il microfono che sta per aprirsi deve lavorare senza internet. */
-  daUsare() { return this.stato === 'disponibile' && (this._forza || senzaInternet()); },
+  daUsare() { return !!this.motore() && (this._forza || senzaInternet()); },
 
   /** Il servizio della voce su internet non risponde: proviamo senza. @returns {boolean} se si può */
   passaAlLocale() {
-    if (this.stato !== 'disponibile' || this._forza) return false;
+    if (!this.motore() || this._forza) return false;
     this._forza = true;
     log('🎤 Internet non risponde: il microfono passa alla voce SENZA internet');
     return true;
+  },
+
+  /** Testo per il menu, tenendo conto anche della voce di ASIA (Vosk). */
+  descrizioneCompleta() {
+    const m = this.motore();
+    if (m === 'chrome') return '✅ Pronta: il telefono capisce la voce anche SENZA internet (voce di Chrome).';
+    if (m === 'vosk') return '✅ Pronta: senza internet ASIA usa la SUA voce (capisce i comandi e le canzoni del telefono).';
+    if (VoceVosk.stato === 'scarico' || VoceVosk.stato === 'installo' || this.stato === 'in_scaricamento') return '⏳ Sto preparando la voce... lascia ASIA aperta col Wi-Fi.';
+    return '❌ Non ancora pronta. Premi il pulsante qui sotto con il Wi-Fi acceso: fa tutto da solo e poi fa una prova.';
+  },
+
+  /** Il pulsante unico del menu: prepara la voce migliore possibile e fa una PROVA VERA.
+   *  @param {function(string)} scrivi  testo da mostrare  @returns {Promise<boolean>} */
+  async provaEPrepara(scrivi) {
+    const dici = t => { try { scrivi(t); } catch (e) {} log('🎤 ' + t); };
+    dici('⏳ Controllo il telefono...');
+    await this.controlla();
+    if (this.stato === 'scaricabile' && !senzaInternet()) { dici('⬇️ Scarico la voce di Chrome...'); await this.installa(); }
+    let motore = this.motore() === 'chrome' ? 'chrome' : null;
+    for (let giro = 0; giro < 2; giro++) {
+      if (!motore) {
+        if (!CanzoniTelefono.elenco.length) dici('⚠️ Consiglio: aggiungi prima le canzoni qui sopra (la voce di ASIA impara i loro titoli).');
+        const ok = await VoceVosk.prepara(dici);
+        if (!ok) { try { await Voce.parla('Non sono riuscita a preparare la voce.'); } catch (e) {} return false; }
+        motore = 'vosk';
+      }
+      // prova vera
+      dici('🎤 PROVA: dopo il suono di\' il titolo di una canzone del telefono (o "stop")...');
+      try { await Voce.parla(CanzoniTelefono.elenco.length ? 'Prova. Dimmi il titolo di una canzone del telefono.' : 'Prova. Dimmi: stop.'); } catch (e) {}
+      try { Suoni.ascolto(); } catch (e) {}
+      const sentito = await this._ascoltaUnaVolta(motore, 9000);
+      if (sentito.errore && motore === 'chrome') {
+        // Chrome diceva di saperlo fare ma non ci riesce: si passa alla voce di ASIA
+        log('🎤 Prova con la voce di Chrome fallita (' + sentito.errore + '): provo la voce di ASIA');
+        this.stato = 'non_disponibile';
+        motore = null;
+        continue;
+      }
+      if (sentito.errore) {
+        dici('❌ Il microfono non ha funzionato (' + sentito.errore + '). Controlla che ASIA abbia il permesso del microfono.');
+        try { await Voce.parla('Il microfono non ha funzionato.'); } catch (e) {}
+        return false;
+      }
+      if (!sentito.testo) {
+        dici('⚠️ Pronta, ma non ho sentito niente. Ripremi il pulsante e parla vicino al telefono.');
+        try { await Voce.parla('Non ho sentito niente. Riprova.'); } catch (e) {}
+        return true;
+      }
+      const trovata = CanzoniTelefono.cerca(sentito.testo);
+      if (trovata) {
+        const b = trovata.brani[0];
+        dici('✅ FUNZIONA! Ho capito «' + sentito.testo + '» → ' + b.titolo + (b.autore ? ' di ' + b.autore : '') +
+             (motore === 'vosk' ? ' (voce di ASIA)' : ' (voce di Chrome)'));
+        try { await Voce.parla('Funziona. Ho capito: ' + b.titolo + '.'); } catch (e) {}
+      } else {
+        dici('🟡 Pronta. Ho capito «' + sentito.testo + '», ma non è una canzone del telefono. Riprova dicendo un titolo come è scritto nell\'elenco.');
+        try { await Voce.parla('Ho capito: ' + sentito.testo + '.'); } catch (e) {}
+      }
+      return true;
+    }
+    return false;
+  },
+
+  /** Ascolta UNA frase con la voce scelta (per la prova del menu). @returns {Promise<{testo?:string, errore?:string}>} */
+  _ascoltaUnaVolta(motore, ms) {
+    return new Promise(fatto => {
+      const SRC = this._SR();
+      let r;
+      try { r = motore === 'vosk' ? new VoskSR() : new SRC(); } catch (e) { fatto({ errore: e.message }); return; }
+      r.lang = 'it-IT'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 3;
+      if (motore === 'chrome') { try { r.processLocally = true; } catch (e) {} }
+      let finito = false, ultimo = '';
+      const fine = (x) => {
+        if (finito) return;
+        finito = true; clearTimeout(timer);
+        try { r.abort(); } catch (e) {}
+        fatto(x);
+      };
+      r.onresult = ev => {
+        for (let i = ev.resultIndex || 0; i < ev.results.length; i++) {
+          const res = ev.results[i];
+          const tx = String((res[0] && res[0].transcript) || '').trim();
+          if (res.isFinal && tx) { fine({ testo: tx }); return; }
+          if (tx) ultimo = tx;
+        }
+      };
+      r.onerror = e => fine(e && e.error === 'no-speech' ? { testo: '' } : { errore: (e && e.error) || 'errore' });
+      r.onend = () => fine({ testo: ultimo });
+      const timer = setTimeout(() => fine({ testo: ultimo }), ms);
+      try { r.start(); } catch (e) { fine({ errore: e.message }); }
+    });
   },
 
   /** Testo per il menu. */
@@ -2946,6 +3057,212 @@ const VoceOffline = {
     }[this.stato] || this.stato;
   }
 };
+// ------------------------------------------------------------
+// 10h. LA VOCE DI ASIA (Vosk) per i telefoni che non hanno quella di Chrome (20/11/2026)
+// ------------------------------------------------------------
+// Vosk (gratuito, Apache-2.0) capisce l'italiano DENTRO il telefono, anche vecchio.
+// Il file della voce (~50 MB) sta su GitHub in 6 pezzi (voce/voce-it.1..6.bin): si
+// scarica UNA volta, si riunisce e Vosk lo salva nel telefono; poi va senza internet.
+// Per sbagliare meno ascolta SOLO i comandi e i titoli/cantanti delle canzoni del telefono.
+const VoceVosk = {
+  PEZZI: 6,
+  PERCORSO: 'voce/voce-it.',
+  SCRIPT: 'voce/vosk.js',
+  VERSIONE: 'it-0.22',
+  CHIAVE: 'asia_vosk_pronta',      // localStorage: versione già installata nel telefono
+  stato: 'assente',                // 'assente' | 'scarico' | 'installo' | 'pronta' | 'errore'
+  errore: '',
+  _modello: null, _caricando: null, _scriptP: null,
+  _sr: null, _nodi: null, _stream: null, _ctx: null,
+
+  installata() { try { return localStorage.getItem(this.CHIAVE) === this.VERSIONE; } catch (e) { return false; } },
+
+  _carica_script() {
+    if (typeof window !== 'undefined' && window.Vosk) return Promise.resolve(window.Vosk);
+    if (this._scriptP) return this._scriptP;
+    this._scriptP = new Promise((ok, ko) => {
+      const s = document.createElement('script');
+      s.src = this.SCRIPT;
+      s.onload = () => window.Vosk ? ok(window.Vosk) : ko(new Error('Vosk non partito'));
+      s.onerror = () => { this._scriptP = null; ko(new Error('programma della voce non scaricato')); };
+      document.head.appendChild(s);
+    });
+    return this._scriptP;
+  },
+
+  _apriModello(url) {
+    return new Promise((ok, ko) => {
+      let m;
+      try { m = new window.Vosk.Model(url, -1); } catch (e) { ko(e); return; }
+      m.on('load', msg => { if (msg.result) ok(m); else { try { m.terminate(); } catch (e) {} ko(new Error('voce non caricata')); } });
+      m.on('error', msg => { try { m.terminate(); } catch (e) {} ko(new Error(msg.error || 'errore della voce')); });
+    });
+  },
+
+  /** Rende pronta la voce: dalla memoria del telefono se c'è, se no la scarica (serve internet).
+   *  @param {function(string)} avanzamento  @returns {Promise<boolean>} */
+  prepara(avanzamento) {
+    if (this._modello) return Promise.resolve(true);
+    if (this._caricando) return this._caricando;
+    const dici = (t) => { if (avanzamento) { try { avanzamento(t); } catch (e) {} } };
+    this._caricando = (async () => {
+      try {
+        dici('⏳ Preparo la voce di ASIA...');
+        await this._carica_script();
+        if (this.installata()) {
+          try {
+            this._modello = await this._apriModello('blob:asia-voce');   // già nel telefono: niente internet
+            this.stato = 'pronta';
+            log('🎤 Voce di ASIA pronta (dalla memoria del telefono)');
+            return true;
+          } catch (e) {
+            log('🎤 Voce di ASIA da reinstallare: ' + e.message);
+            try { localStorage.removeItem(this.CHIAVE); } catch (e2) {}
+          }
+        }
+        if (senzaInternet()) { this.stato = 'assente'; dici('❌ Serve internet (Wi-Fi) per scaricare la voce la prima volta.'); return false; }
+        this.stato = 'scarico';
+        const parti = [];
+        for (let i = 1; i <= this.PEZZI; i++) {
+          dici('⬇️ Scarico la voce di ASIA: ' + Math.round((i - 1) / this.PEZZI * 100) + '% (lascia ASIA aperta)');
+          const r = await fetch(this.PERCORSO + i + '.bin', { cache: 'no-cache' });
+          if (!r.ok) throw new Error('pezzo ' + i + ' non trovato (HTTP ' + r.status + ')');
+          parti.push(await r.blob());
+        }
+        this.stato = 'installo';
+        dici('⏳ Installo la voce nel telefono (anche un minuto)...');
+        const url = URL.createObjectURL(new Blob(parti, { type: 'application/gzip' }));
+        try { this._modello = await this._apriModello(url); }
+        finally { try { URL.revokeObjectURL(url); } catch (e) {} }
+        try { localStorage.setItem(this.CHIAVE, this.VERSIONE); } catch (e) {}
+        try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+        this.stato = 'pronta';
+        log('🎤 Voce di ASIA scaricata e installata');
+        return true;
+      } catch (e) {
+        this.stato = 'errore';
+        this.errore = (e && e.message) || String(e);
+        log('❌ Voce di ASIA: ' + this.errore);
+        dici('❌ Voce di ASIA non pronta: ' + this.errore);
+        return false;
+      } finally {
+        this._caricando = null;
+      }
+    })();
+    return this._caricando;
+  },
+
+  /** Al tocco di AVVIA (gesto dell'utente): sblocca l'audio per il microfono di Vosk. */
+  sblocca() {
+    if (!this.installata() || typeof window === 'undefined') return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!this._ctx) this._ctx = new AC();
+    if (this._ctx.state === 'suspended') { try { this._ctx.resume(); } catch (e) {} }
+  },
+
+  /** Le sole frasi che Vosk deve riconoscere: comandi + titoli e cantanti del telefono. */
+  frasi() {
+    const pulisci = s => String(s || '').toLowerCase().replace(/['’`]/g, ' ').replace(/[^\p{L}\p{N} ]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const out = new Set(['[unk]']);
+    const add = s => { const p = pulisci(s); if (p) out.add(p); };
+    ['comandiStop', 'comandiPausa', 'comandiRiprendi', 'comandiSalta', 'comandiIndietro', 'comandiVolumeSu',
+     'comandiVolumeGiu', 'comandiDiNuovo', 'comandiUnAltra', 'comandiInfo', 'comandiSpegni']
+      .forEach(k => comandiArray(settings[k]).forEach(add));
+    ['asia', 'metti', 'mettimi', 'fammi sentire', 'voglio sentire', 'suona', 'stop', 'basta', 'pausa', 'salta', 'avanti',
+     'metti le canzoni del telefono', 'le canzoni del telefono', 'metti i miei preferiti', 'i miei preferiti',
+     'questa mi piace', 'non mi piace', 'che canzone è', 'chi canta', 'un altra', 'buonanotte', 'grazie', 'ciao asia']
+      .forEach(add);
+    CanzoniTelefono.elenco.forEach(v => {
+      const t = pulisci(v.titolo), a = pulisci(v.autore);
+      if (t) { add(t); add('metti ' + t); }
+      if (a) { add(a); add('metti ' + a); add('metti le canzoni di ' + a); }
+      if (t && a) { add(t + ' di ' + a); add('metti ' + t + ' di ' + a); }
+    });
+    return [...out];
+  },
+
+  /** Avvia l'ascolto per un VoskSR (chiamato da VoskSR.start). */
+  async ascolta(sr) {
+    const ok = await this.prepara();
+    if (!sr._attivo) return;
+    if (!ok) { sr._errore('language-not-supported'); return; }
+    this.smetti(this._sr);
+    this._sr = sr;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!this._ctx) this._ctx = new AC();
+      if (this._ctx.state === 'suspended') { try { await this._ctx.resume(); } catch (e) {} }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+      if (this._sr !== sr || !sr._attivo) { stream.getTracks().forEach(t => t.stop()); return; }
+      this._stream = stream;
+      const rec = new this._modello.KaldiRecognizer(this._ctx.sampleRate, JSON.stringify(this.frasi()));
+      rec.on('result', m => { if (this._sr === sr) sr._testo(m && m.result && m.result.text, true); });
+      rec.on('partialresult', m => { if (this._sr === sr) sr._testo(m && m.result && m.result.partial, false); });
+      rec.on('error', m => { log('🎤 Voce di ASIA: ' + (m && m.error)); });
+      const src = this._ctx.createMediaStreamSource(stream);
+      const proc = this._ctx.createScriptProcessor(4096, 1, 1);
+      proc.onaudioprocess = ev => { if (this._sr === sr) { try { rec.acceptWaveform(ev.inputBuffer); } catch (e) {} } };
+      src.connect(proc);
+      proc.connect(this._ctx.destination);   // senza, Chrome non fa partire l'elaborazione (esce silenzio)
+      this._nodi = { src, proc, rec };
+    } catch (e) {
+      log('❌ Microfono per la voce di ASIA: ' + (e && e.message));
+      sr._errore('audio-capture');
+    }
+  },
+
+  /** Chiude il microfono di Vosk (libera anche il microfono del telefono). */
+  smetti(sr) {
+    if (!sr || this._sr !== sr) return;
+    this._sr = null;
+    const n = this._nodi; this._nodi = null;
+    if (n) {
+      try { n.proc.onaudioprocess = null; n.src.disconnect(); n.proc.disconnect(); } catch (e) {}
+      try { n.rec.remove(); } catch (e) {}
+    }
+    if (this._stream) { try { this._stream.getTracks().forEach(t => t.stop()); } catch (e) {} this._stream = null; }
+  }
+};
+
+/** Un "riconoscitore" con le stesse regole di quello di Chrome, ma che usa la voce di ASIA:
+ *  il Listener lo usa senza accorgersi della differenza. */
+function VoskSR() {
+  this.lang = 'it-IT'; this.continuous = true; this.interimResults = true; this.maxAlternatives = 1;
+  this.onresult = null; this.onerror = null; this.onend = null;
+  this._attivo = false; this._risultati = []; this._finali = 0;
+}
+VoskSR.prototype.start = function () {
+  if (this._attivo) return;
+  this._attivo = true;
+  VoceVosk.ascolta(this).catch(() => this._errore('audio-capture'));
+};
+VoskSR.prototype.stop = VoskSR.prototype.abort = function () {
+  if (!this._attivo) return;
+  this._attivo = false;
+  VoceVosk.smetti(this);
+  setTimeout(() => { if (this.onend) this.onend(); }, 0);
+};
+VoskSR.prototype._errore = function (tipo) {
+  if (!this._attivo) return;
+  this._attivo = false;
+  VoceVosk.smetti(this);
+  if (this.onerror) this.onerror({ error: tipo });
+  setTimeout(() => { if (this.onend) this.onend(); }, 0);
+};
+VoskSR.prototype._testo = function (testo, finale) {
+  if (!this._attivo) return;
+  testo = String(testo || '').replace(/\[unk\]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!testo && !finale) return;
+  if (!testo && this._risultati.length <= this._finali) return;   // silenzio: niente da chiudere
+  const i = this._finali;
+  const voce = [{ transcript: testo, confidence: 0.8 }];
+  voce.isFinal = !!finale;
+  this._risultati[i] = voce;
+  if (finale) this._finali = i + 1;
+  if (this.onresult) this.onresult({ resultIndex: i, results: this._risultati });
+};
+
 if (typeof window !== 'undefined' && window.addEventListener) {
   // tornato internet: il microfono torna normale (è più preciso)
   window.addEventListener('online', () => { if (VoceOffline._forza) { VoceOffline._forza = false; log('🌐 Internet tornato'); } });
@@ -5536,6 +5853,20 @@ document.getElementById('stopBtn').addEventListener('click', comandoStopManuale)
  *    due colpi veloci      → salta alla prossima canzone
  *    tenuto giù 2 secondi  → STOP (zittisce / ferma la musica / chiude)
  *  I rimbalzi del pulsante (< 40 ms) vengono ignorati. */
+/** 20/11/2026: tocco senza voce (niente internet e nessuna voce sul telefono):
+ *  se suona → la prossima canzone del telefono; se no → partono le canzoni del telefono. */
+function toccoSenzaVoce() {
+  try { Suoni.init(); } catch (e) {}
+  const st = Player.stato();
+  if ((st === 'suona' || st === 'caricamento' || st === 'pausa') && (Coda.haAltri() || Coda._continuaColTelefono())) {
+    Suoni.salto();
+    Coda.prossima();
+    return;
+  }
+  Esecutore.eseguiRicerca({ tipo: 'RICERCA', intent: 'telefono', query: '', testo: 'tocco senza voce', motivo: 'tocco senza voce' }, null)
+    .catch(e => log('❌ Tocco senza voce: ' + (e && e.message)));
+}
+
 const Gesti = {
   DOPPIO_MS: 450,
   LUNGO_MS: 2000,
@@ -5570,6 +5901,13 @@ const Gesti = {
       if (n >= 2 && Sessione.attiva && (Player.stato() !== 'fermo' || Coda.haAltri() || Coda.haDaCercare())) {
         log('👆 ' + fonte + ': due colpi → salta');
         Esecutore.eseguiComando({ azione: 'SALTA' });
+        return;
+      }
+      // 20/11/2026: senza internet e senza nessuna voce che funzioni, Domenico (che non vede)
+      // ascolta lo stesso: un tocco = parte/salta una canzone del telefono.
+      if (senzaInternet() && !VoceOffline.motore() && CanzoniTelefono.elenco.length) {
+        log('👆 ' + fonte + ': senza internet e senza voce → canzone del telefono');
+        toccoSenzaVoce();
         return;
       }
       log('👆 ' + fonte + ': un colpo → ti ascolto');

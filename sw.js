@@ -4,7 +4,8 @@
 // La ricerca musicale e la conversazione richiedono comunque internet:
 // questo SW non tenta di far funzionare tutto offline.
 
-const CACHE_NAME = 'asia-shell-v3'; // v3 (20/11/2026): index.html sempre nuovo (niente attesa di 10 minuti)
+const CACHE_NAME = 'asia-shell-v4'; // v4 (20/11/2026): conserva anche voce/vosk.js (voce senza internet)
+                                    // v3 (20/11/2026): index.html sempre nuovo (niente attesa di 10 minuti)
                                     // v2 (11/11/2026): non salva più le pagine di errore (404)
 const SHELL_FILES = [
   './',
@@ -54,6 +55,20 @@ self.addEventListener('fetch', (event) => {
           return resp;
         })
         .catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  // 20/11/2026: il programma della voce di ASIA (Vosk) serve anche SENZA internet:
+  // la prima volta si scarica e si conserva, poi si usa la copia conservata.
+  if (url.pathname.endsWith('/voce/vosk.js')) {
+    event.respondWith(
+      caches.open(CACHE_NAME).then((cache) =>
+        cache.match(req).then((salvato) => salvato || fetch(req).then((resp) => {
+          if (resp && resp.ok) cache.put(req, resp.clone());
+          return resp;
+        }))
+      )
     );
     return;
   }

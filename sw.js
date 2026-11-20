@@ -4,7 +4,8 @@
 // La ricerca musicale e la conversazione richiedono comunque internet:
 // questo SW non tenta di far funzionare tutto offline.
 
-const CACHE_NAME = 'asia-shell-v2'; // v2 (11/11/2026): non salva più le pagine di errore (404)
+const CACHE_NAME = 'asia-shell-v3'; // v3 (20/11/2026): index.html sempre nuovo (niente attesa di 10 minuti)
+                                    // v2 (11/11/2026): non salva più le pagine di errore (404)
 const SHELL_FILES = [
   './',
   './index.html',
@@ -41,7 +42,9 @@ self.addEventListener('fetch', (event) => {
 
   if (url.pathname.endsWith('index.html') || url.pathname.endsWith('/')) {
     event.respondWith(
-      fetch(req)
+      // 20/11/2026: 'no-cache' = chiede SEMPRE a GitHub se c'è una versione nuova.
+      // Prima il telefono teneva la copia vecchia fino a 10 minuti dopo un aggiornamento.
+      fetch(req, { cache: 'no-cache' })
         .then((resp) => {
           // Salva in memoria solo le pagine buone: mai un 404 o altri errori.
           if (resp && resp.ok) {
